@@ -14,6 +14,8 @@
 
 #include "rl_controller/fsm/FSM.h"
 
+#include <algorithm>
+#include <cmath>
 #include <iostream>
 
 #include "rl_controller/fsm/FSMState_RLPPO.h"
@@ -93,8 +95,12 @@ void FSM::run()
   }
   // limit torque out put
   for (Eigen::Index i = 0; i < _data->low_cmd->tau_cmd.size(); i++) {
-    std::clamp(
-      _data->low_cmd->tau_cmd[i], _data->params->torque_limit[i], -_data->params->torque_limit[i]);
+    if (i >= static_cast<Eigen::Index>(_data->params->torque_limit.size())) {
+      continue;
+    }
+    const scalar_t torque_limit = std::abs(_data->params->torque_limit[i]);
+    _data->low_cmd->tau_cmd[i] =
+      std::clamp(_data->low_cmd->tau_cmd[i], -torque_limit, torque_limit);
   }
 
   count++;

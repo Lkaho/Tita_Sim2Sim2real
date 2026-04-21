@@ -63,14 +63,20 @@ struct RLParameters
   int num_obs;
   int num_actions;
   int history_len{1};
+  std::string observations_history_mode{"frame"};
   std::vector<std::string> observations_name{"ang_vel", "gravity", "commands",
                                              "dof_pos", "dof_vel", "last_actions"};
+  std::vector<long int> observations_dims;
   std::vector<std::string> commands_name{"lin_vel_x", "lin_vel_y", "ang_vel_z"};
   std::vector<scalar_t> commands_scale{2.0, 2.0, 0.25};
   std::vector<scalar_t> max_commands{1.0, 1.0, 1.0};
   std::vector<scalar_t> min_commands{-1.0, -1.0, -1.0};
   std::vector<scalar_t> commands_comp{0.0, 0.0, 0.0};
   std::vector<scalar_t> commands_gain{1.0, 1.0, 1.0};
+  std::string base_lin_vel_xy_sim_topic{""};
+  int base_lin_vel_xy_sim_rate_hz{0};
+  std::string base_lin_vel_xy_hw_topic{""};
+  int base_lin_vel_xy_hw_rate_hz{0};
   scalar_t episode_length{0};  // 0 means no limit, units: seconds
 
   scalar_t time_interval{0.02};
@@ -92,6 +98,8 @@ struct RLParameters
   scalar_t output_torque_scale{1.0};
   std::vector<long int> reindex;
   std::vector<scalar_t> re_sign;
+  std::vector<long int> observation_reindex;
+  std::vector<scalar_t> observation_re_sign;
   // scalar_t max_lin_vel_x{1.0}, max_lin_vel_y{1.0}, max_ang_vel_z{1.0};
 };
 struct RobotControlParameters

@@ -15,10 +15,12 @@
 #ifndef WEBOTS_BRIDGE__WEBOTS_BRIDGE_NODE_HPP_
 #define WEBOTS_BRIDGE__WEBOTS_BRIDGE_NODE_HPP_
 
+#include <limits>
 #include <memory>
 #include <string>
 #include <vector>
 
+#include "geometry_msgs/msg/vector3.hpp"
 #include "hardware_interface/handle.hpp"
 #include "hardware_interface/hardware_info.hpp"
 #include "hardware_interface/system_interface.hpp"
@@ -27,6 +29,7 @@
 #include "realtime_tools/realtime_publisher.hpp"
 #include "webots/accelerometer.h"
 #include "webots/gyro.h"
+#include "webots/gps.h"
 #include "webots/inertial_unit.h"
 #include "webots/motor.h"
 #include "webots/position_sensor.h"
@@ -48,6 +51,7 @@ struct Joint
   double velocityCommand = 0.0f;
   double kp = 0.0f;
   double kd = 0.0f;
+  double velocityLimit = std::numeric_limits<double>::infinity();
 
   std::string name;
   WbDeviceTag motor;
@@ -63,6 +67,14 @@ struct InertiaUnit
   double linear_acceleration[3];
   double angular_velocity[3];
   double orientation[4];  // x y z w
+};
+
+struct GPSSensor
+{
+  WbDeviceTag gps{0};
+  std::string speed_vector_topic;
+  rclcpp::Publisher<geometry_msgs::msg::Vector3>::SharedPtr speed_vector_publisher;
+  geometry_msgs::msg::Vector3 speed_vector_msg;
 };
 
 class WebotsBridge : public webots_ros2_control::Ros2ControlSystemInterface
@@ -90,6 +102,7 @@ private:
   webots_ros2_driver::WebotsNode * mNode;
   std::vector<Joint> mJoints;
   InertiaUnit mImu;
+  GPSSensor mGps;
 };
 }  // namespace tita_webots_ros2_control
 

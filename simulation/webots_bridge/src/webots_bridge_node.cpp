@@ -27,6 +27,66 @@
 #include "webots/robot.h"
 namespace tita_webots_ros2_control
 {
+namespace
+{
+constexpr double kWheelVelocityLimit = 20.0;
+
+WbDeviceTag find_device_by_name(const std::string & name, WbNodeType expected_type)
+{
+  if (name.empty()) {
+    return 0;
+  }
+
+  WbDeviceTag device = wb_robot_get_device(name.c_str());
+  if (device != 0 && wb_device_get_node_type(device) == expected_type) {
+    return device;
+  }
+  return 0;
+}
+
+WbDeviceTag find_first_device_by_type(WbNodeType expected_type)
+{
+  const int device_count = wb_robot_get_number_of_devices();
+  for (int i = 0; i < device_count; ++i) {
+    WbDeviceTag device = wb_robot_get_device_by_index(i);
+    if (device != 0 && wb_device_get_node_type(device) == expected_type) {
+      return device;
+    }
+  }
+  return 0;
+}
+
+std::string device_name_or_empty(WbDeviceTag device)
+{
+  if (device == 0) {
+    return "";
+  }
+
+  const char * name = wb_device_get_name(device);
+  return name == nullptr ? "" : std::string(name);
+}
+
+bool is_wheel_joint_name(const std::string & joint_name)
+{
+  return joint_name.find("_leg_4") != std::string::npos;
+}
+
+double apply_velocity_limit(const Joint & joint, double effort)
+{
+  if (!std::isfinite(joint.velocityLimit) || !std::isfinite(joint.velocity)) {
+    return effort;
+  }
+
+  if (std::abs(joint.velocity) < joint.velocityLimit) {
+    return effort;
+  }
+
+  // Match the actuator semantics used in Isaac Lab: once the wheel is already over the
+  // configured speed limit, only allow torques that brake it back toward the limit.
+  return effort * joint.velocity > 0.0 ? 0.0 : effort;
+}
+}  // namespace
+
 WebotsBridge::WebotsBridge() { mNode = NULL; }
 void WebotsBridge::init(
   webots_ros2_driver::WebotsNode * node, const hardware_interface::HardwareInfo & info)
@@ -35,6 +95,9 @@ void WebotsBridge::init(
   for (hardware_interface::ComponentInfo component : info.joints) {
     Joint joint;
     joint.name = component.name;
+    if (is_wheel_joint_name(joint.name)) {
+      joint.velocityLimit = kWheelVelocityLimit;
+    }
 
     WbDeviceTag device = wb_robot_get_device(joint.name.c_str());
     WbNodeType type = wb_device_get_node_type(device);
@@ -63,26 +126,76 @@ void WebotsBridge::init(
       }
     }
 
+    if (std::isfinite(joint.velocityLimit)) {
+      RCLCPP_INFO(
+        rclcpp::get_logger("webots_bridge"), "Applied velocity limit %.2f rad/s to joint '%s'",
+        joint.velocityLimit, joint.name.c_str());
+    }
+
     mJoints.push_back(joint);
   }
   wb_robot_step(wb_robot_get_basic_time_step());
 
   for (hardware_interface::ComponentInfo component : info.sensors) {
     std::string sensor_name = component.name;
-    WbDeviceTag device = wb_robot_get_device(std::string(sensor_name + " inertial").c_str());
-    WbNodeType type = wb_device_get_node_type(device);
-    if (type == WB_NODE_INERTIAL_UNIT) {
+    WbDeviceTag inertial_device =
+      find_device_by_name(sensor_name + " inertial", WB_NODE_INERTIAL_UNIT);
+    if (inertial_device == 0) {
+      inertial_device = find_device_by_name(sensor_name, WB_NODE_INERTIAL_UNIT);
+    }
+    if (inertial_device == 0) {
+      inertial_device = find_first_device_by_type(WB_NODE_INERTIAL_UNIT);
+    }
+
+    if (inertial_device != 0) {
       mImu.name = sensor_name;
-      mImu.inertialUnit = device;
-      mImu.gyro = wb_robot_get_device(std::string(sensor_name + " gyro").c_str());
-      mImu.accelerometer =
-        wb_robot_get_device(std::string(sensor_name + " accelerometer").c_str());  // defalt name
+      mImu.inertialUnit = inertial_device;
+      mImu.gyro = find_device_by_name(sensor_name + " gyro", WB_NODE_GYRO);
+      if (mImu.gyro == 0) {
+        mImu.gyro = find_first_device_by_type(WB_NODE_GYRO);
+      }
+      mImu.accelerometer = find_device_by_name(
+        sensor_name + " accelerometer", WB_NODE_ACCELEROMETER);
+      if (mImu.accelerometer == 0) {
+        mImu.accelerometer = find_first_device_by_type(WB_NODE_ACCELEROMETER);
+      }
+
       wb_inertial_unit_enable(mImu.inertialUnit, wb_robot_get_basic_time_step());
       if (mImu.gyro) wb_gyro_enable(mImu.gyro, wb_robot_get_basic_time_step());
       if (mImu.accelerometer)
         wb_accelerometer_enable(mImu.accelerometer, wb_robot_get_basic_time_step());
+
+      RCLCPP_INFO(
+        rclcpp::get_logger("webots_bridge"),
+        "Mapped ros2_control IMU '%s' to Webots devices: inertial='%s', gyro='%s', accelerometer='%s'",
+        sensor_name.c_str(), device_name_or_empty(mImu.inertialUnit).c_str(),
+        device_name_or_empty(mImu.gyro).c_str(),
+        device_name_or_empty(mImu.accelerometer).c_str());
     }
-    // std::cout << "\033[35m" << sensor_name << type << "\033[0m" << std::endl;
+  }
+
+  mGps.gps = find_device_by_name("gps", WB_NODE_GPS);
+  if (mGps.gps == 0) {
+    mGps.gps = find_first_device_by_type(WB_NODE_GPS);
+  }
+
+  if (mGps.gps != 0) {
+    wb_gps_enable(mGps.gps, wb_robot_get_basic_time_step());
+    const char * robot_name = wb_robot_get_name();
+    const std::string robot_topic_prefix =
+      (robot_name != nullptr && robot_name[0] != '\0') ? robot_name : "webots_robot";
+    mGps.speed_vector_topic = robot_topic_prefix + "/gps/speed_vector";
+    mGps.speed_vector_publisher = mNode->create_publisher<geometry_msgs::msg::Vector3>(
+      mGps.speed_vector_topic, rclcpp::SensorDataQoS());
+
+    RCLCPP_INFO(
+      rclcpp::get_logger("webots_bridge"),
+      "Publishing Webots GPS speed vector from device '%s' on topic '%s'",
+      device_name_or_empty(mGps.gps).c_str(), mGps.speed_vector_topic.c_str());
+  } else {
+    RCLCPP_WARN(
+      rclcpp::get_logger("webots_bridge"),
+      "No Webots GPS device found, topic '<robot_name>/gps/speed_vector' will not be published");
   }
 }
 
@@ -211,6 +324,14 @@ hardware_interface::return_type WebotsBridge::read(
     mImu.orientation[3] = values[3];
   }
 
+  if (mGps.gps != 0 && mGps.speed_vector_publisher != nullptr) {
+    const double * values = wb_gps_get_speed_vector(mGps.gps);
+    mGps.speed_vector_msg.x = values[0];
+    mGps.speed_vector_msg.y = values[1];
+    mGps.speed_vector_msg.z = values[2];
+    mGps.speed_vector_publisher->publish(mGps.speed_vector_msg);
+  }
+
   return hardware_interface::return_type::OK;
 }
 
@@ -221,6 +342,7 @@ hardware_interface::return_type WebotsBridge::write(
     if (joint.motor) {
       auto effort = joint.kp * (joint.positionCommand - joint.position) +
                     joint.kd * (joint.velocityCommand - joint.velocity) + joint.effortCommand;
+      effort = apply_velocity_limit(joint, effort);
       // joint.effortCommand = effort;
       wb_motor_set_torque(joint.motor, effort);
     }

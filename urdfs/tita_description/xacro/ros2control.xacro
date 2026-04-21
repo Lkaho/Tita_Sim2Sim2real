@@ -23,6 +23,12 @@
       </gazebo>
 
       <xacro:if value="${hw_env == 'webots'}">
+        <gazebo reference="base_link">
+          <plugin filename="libgazebo_ros_p3d.so" name="ground_truth_pose">
+            <topicName>ground_truth</topicName>
+          </plugin>
+        </gazebo>
+
         <webots>
           <plugin type="webots_ros2_control::Ros2Control" />
         </webots>

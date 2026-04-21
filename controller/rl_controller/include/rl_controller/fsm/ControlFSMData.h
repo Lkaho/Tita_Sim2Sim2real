@@ -16,6 +16,7 @@
 #define RL_CONTROLLER__FSM__CONTROLFSMDATA_H_
 #include <memory>
 
+#include "rclcpp_lifecycle/lifecycle_node.hpp"
 #include "rl_controller/common/Math/MathUtilities.h"
 #include "rl_controller/common/Math/orientation_tools.h"
 #include "rl_controller/common/RobotParameters.h"
@@ -35,6 +36,7 @@ struct ControlFSMData
   std::shared_ptr<LowlevelCmd> low_cmd;
   std::shared_ptr<LowlevelState> low_state;
   std::shared_ptr<RemoteControlData> rc_data;
+  rclcpp_lifecycle::LifecycleNode::SharedPtr node;
 };
 
 #endif  // RL_CONTROLLER__FSM__CONTROLFSMDATA_H_

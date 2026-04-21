@@ -362,6 +362,7 @@ void RlController::joy_cb(const sensor_msgs::msg::Joy::SharedPtr msg)
 void RlController::setup_controller()
 {
   controlData_ = std::make_shared<ControlFSMData>(joint_names_.size());
+  controlData_->node = get_node();
   setup_control_parameters();
   FSMController_ = std::make_shared<FSM>(controlData_);
 }
@@ -408,8 +409,12 @@ void RlController::update_control_parameters()
     get_node()->get_parameter<int>(policy_name + ".num_obs", rl_params.num_obs);
     get_node()->get_parameter<int>(policy_name + ".num_actions", rl_params.num_actions);
     get_node()->get_parameter<int>(policy_name + ".history_len", rl_params.history_len);
+    get_node()->get_parameter<std::string>(
+      policy_name + ".observations_history_mode", rl_params.observations_history_mode);
     get_node()->get_parameter<std::vector<std::string>>(
       policy_name + ".observations_name", rl_params.observations_name);
+    get_node()->get_parameter<std::vector<long int>>(
+      policy_name + ".observations_dims", rl_params.observations_dims);
     get_node()->get_parameter<std::vector<std::string>>(
       policy_name + ".commands_name", rl_params.commands_name);
     get_node()->get_parameter<std::vector<scalar_t>>(
@@ -418,6 +423,14 @@ void RlController::update_control_parameters()
       policy_name + ".min_commands", rl_params.min_commands);
     get_node()->get_parameter<std::vector<scalar_t>>(
       policy_name + ".commands_comp", rl_params.commands_comp);
+    get_node()->get_parameter<std::string>(
+      policy_name + ".base_lin_vel_xy.sim_topic", rl_params.base_lin_vel_xy_sim_topic);
+    get_node()->get_parameter<int>(
+      policy_name + ".base_lin_vel_xy.sim_rate_hz", rl_params.base_lin_vel_xy_sim_rate_hz);
+    get_node()->get_parameter<std::string>(
+      policy_name + ".base_lin_vel_xy.hw_topic", rl_params.base_lin_vel_xy_hw_topic);
+    get_node()->get_parameter<int>(
+      policy_name + ".base_lin_vel_xy.hw_rate_hz", rl_params.base_lin_vel_xy_hw_rate_hz);
     get_node()->get_parameter<scalar_t>(policy_name + ".episode_length", rl_params.episode_length);
     // control
     get_node()->get_parameter<scalar_t>(policy_name + ".time_interval", rl_params.time_interval);
@@ -436,6 +449,10 @@ void RlController::update_control_parameters()
       policy_name + ".output_torque_scale", rl_params.output_torque_scale);
     get_node()->get_parameter<std::vector<long int>>(policy_name + ".reindex", rl_params.reindex);
     get_node()->get_parameter<std::vector<scalar_t>>(policy_name + ".re_sign", rl_params.re_sign);
+    get_node()->get_parameter<std::vector<long int>>(
+      policy_name + ".observation_reindex", rl_params.observation_reindex);
+    get_node()->get_parameter<std::vector<scalar_t>>(
+      policy_name + ".observation_re_sign", rl_params.observation_re_sign);
   };
 
   for (auto policy_name : param->rl_policy_names) {

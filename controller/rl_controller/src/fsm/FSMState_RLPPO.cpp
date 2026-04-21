@@ -32,15 +32,15 @@ void FSMState_RLPPO::update_forward()
 
     if (!stop_update_) {
       update_observations();
-      obs_history_vec_.head(obs_history_vec_.size() - obs_vec_.size()) =
-        obs_history_vec_.tail(obs_history_vec_.size() - obs_vec_.size());
-      obs_history_vec_.tail(obs_vec_.size()) = obs_vec_;
+      append_observation_history();
 
       std::vector<std::vector<tensor_element_t>> input_datas;
       std::vector<tensor_element_t> input_data_1 = eigenToVector(obs_history_vec_);
       input_datas.push_back(input_data_1);
       action_vec_ = vectorToEigen(inferrer_->computeActions(input_datas));
       obs_.last_actions = action_vec_;
+      action_vec_ = reindex_action(action_vec_);
+      action_vec_ = re_sign_action(action_vec_);
 
       // DVec<tensor_element_t> action_scaled = action_vec_ * rl_params_->action_scale;
       // command_position_ = action_scaled + d2f(vectorToEigen(rl_params_->default_joint_angles));

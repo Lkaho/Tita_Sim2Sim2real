@@ -91,7 +91,9 @@
         num_obs: 57
         num_actions: 16
         history_len: 10
+        observations_history_mode: "frame"
         observations_name: ["ang_vel", "gravity", "commands", "dof_pos", "dof_vel", "last_actions"]
+        observations_dims: [3, 3, 3, 16, 16, 16]
         commands_name: ["lin_vel_x", "lin_vel_y", "ang_vel_z"]
         commands_scale: [2.0, 2.0, 0.25] # lin_vel_scale, lin_vel_scale, ang_vel_scale
         max_commands: [1.0, 1.0, 1.0]
