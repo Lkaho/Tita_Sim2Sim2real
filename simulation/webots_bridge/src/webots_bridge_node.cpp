@@ -16,8 +16,10 @@
 
 #include <chrono>
 #include <cmath>
+#include <iostream>
 #include <limits>
 #include <memory>
+#include <sstream>
 #include <vector>
 
 #include "hardware_interface/types/hardware_interface_type_values.hpp"
@@ -338,14 +340,49 @@ hardware_interface::return_type WebotsBridge::read(
 hardware_interface::return_type WebotsBridge::write(
   const rclcpp::Time & /*time*/, const rclcpp::Duration & /*period*/)
 {
+  std::vector<std::string> wheel_debug_entries;
+  std::vector<std::string> leg_debug_entries;
   for (Joint & joint : mJoints) {
     if (joint.motor) {
-      auto effort = joint.kp * (joint.positionCommand - joint.position) +
-                    joint.kd * (joint.velocityCommand - joint.velocity) + joint.effortCommand;
-      effort = apply_velocity_limit(joint, effort);
-      // joint.effortCommand = effort;
+      const auto raw_effort =
+        joint.kp * (joint.positionCommand - joint.position) +
+        joint.kd * (joint.velocityCommand - joint.velocity) + joint.effortCommand;
+      const auto effort = apply_velocity_limit(joint, raw_effort);
       wb_motor_set_torque(joint.motor, effort);
+
+      std::ostringstream entry;
+      entry << "name=" << joint.name << " q=" << joint.position << " dq=" << joint.velocity
+            << " q_cmd=" << joint.positionCommand << " dq_cmd=" << joint.velocityCommand
+            << " kp=" << joint.kp << " kd=" << joint.kd << " tau_ff=" << joint.effortCommand
+            << " raw_effort=" << raw_effort << " applied_effort=" << effort;
+      if (std::isfinite(joint.velocityLimit)) {
+        entry << " vel_limit=" << joint.velocityLimit
+              << " limit_active=" << ((std::abs(joint.velocity) >= joint.velocityLimit) ? 1 : 0)
+              << " limit_zeroed=" << ((raw_effort != 0.0 && effort == 0.0) ? 1 : 0);
+      }
+      if (is_wheel_joint_name(joint.name)) {
+        wheel_debug_entries.push_back(entry.str());
+      } else {
+        leg_debug_entries.push_back(entry.str());
+      }
     }
+  }
+  const double now = wb_robot_get_time();
+  if (!wheel_debug_entries.empty() && now - lastWheelDebugTime_ > 0.5) {
+    lastWheelDebugTime_ = now;
+    std::cout << "[WebotsBridge][wheel_applied]";
+    for (const auto & entry : wheel_debug_entries) {
+      std::cout << " {" << entry << "}";
+    }
+    std::cout << std::endl;
+  }
+  if (!leg_debug_entries.empty() && now - lastLegDebugTime_ > 0.5) {
+    lastLegDebugTime_ = now;
+    std::cout << "[WebotsBridge][leg_applied]";
+    for (const auto & entry : leg_debug_entries) {
+      std::cout << " {" << entry << "}";
+    }
+    std::cout << std::endl;
   }
   return hardware_interface::return_type::OK;
 }

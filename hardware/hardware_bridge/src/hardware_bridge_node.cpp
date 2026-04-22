@@ -14,6 +14,9 @@
 
 #include "hardware_bridge/hardware_bridge_node.hpp"
 
+#include <algorithm>
+#include <cmath>
+#include <sstream>
 #include <pthread.h>
 #include <sched.h>
 
@@ -21,6 +24,41 @@
 
 namespace tita_locomotion
 {
+namespace
+{
+constexpr double kWheelVelocityLimit = 20.0;
+constexpr double kWheelTorqueLimit = 20.0;
+constexpr double kWheelTorqueSlewRate = 120.0;  // Nm/s
+constexpr double kFallbackControlDt = 0.002;    // 500 Hz ros2_control loop
+
+bool is_wheel_joint(size_t id, size_t leg_dof)
+{
+  return leg_dof > 0 && id % leg_dof == leg_dof - 1;
+}
+
+double apply_wheel_velocity_limit(double torque, double velocity)
+{
+  if (!std::isfinite(torque) || !std::isfinite(velocity)) {
+    return torque;
+  }
+
+  if (std::abs(velocity) < kWheelVelocityLimit) {
+    return torque;
+  }
+
+  return torque * velocity > 0.0 ? 0.0 : torque;
+}
+
+double apply_torque_slew_limit(double target, double previous, double max_delta)
+{
+  if (!std::isfinite(target) || !std::isfinite(previous) || max_delta <= 0.0) {
+    return target;
+  }
+
+  return previous + std::clamp(target - previous, -max_delta, max_delta);
+}
+}  // namespace
+
 HardwareBridge::HardwareBridge() {}
 HardwareBridge::~HardwareBridge()
 {
@@ -186,9 +224,21 @@ hardware_interface::return_type HardwareBridge::read(
 }
 
 hardware_interface::return_type HardwareBridge::write(
-  const rclcpp::Time & /*time*/, const rclcpp::Duration & /*period*/)
+  const rclcpp::Time & /*time*/, const rclcpp::Duration & period)
 {
   std::vector<double> kp, kd, p, v, t, only_ts;
+  if (last_only_ts_.size() != mJoints.size()) {
+    last_only_ts_.assign(mJoints.size(), 0.0);
+    has_last_only_ts_ = false;
+  }
+
+  const double period_seconds = period.seconds();
+  const double dt = period_seconds > 0.0 && std::isfinite(period_seconds)
+                      ? period_seconds
+                      : kFallbackControlDt;
+  const double max_wheel_torque_delta = kWheelTorqueSlewRate * dt;
+  std::vector<std::string> wheel_debug_entries;
+
   for (size_t id = 0; id < mJoints.size(); id++) {
     kp.push_back(mJoints[id].kp);
     kd.push_back(mJoints[id].kd);
@@ -198,11 +248,48 @@ hardware_interface::return_type HardwareBridge::write(
     p.push_back(mJoints[id].positionCommand);
     v.push_back(mJoints[id].velocityCommand);
     t.push_back(mJoints[id].effortCommand);
-    auto only_t = mJoints[id].effortCommand +
-                  mJoints[id].kp * (mJoints[id].positionCommand - mJoints[id].position) +
-                  mJoints[id].kd * (mJoints[id].velocityCommand - mJoints[id].velocity);
+    const auto raw_only_t =
+      mJoints[id].effortCommand +
+      mJoints[id].kp * (mJoints[id].positionCommand - mJoints[id].position) +
+      mJoints[id].kd * (mJoints[id].velocityCommand - mJoints[id].velocity);
+
+    auto only_t = raw_only_t;
+    auto velocity_limited_t = raw_only_t;
+    if (is_wheel_joint(id, leg_dof_)) {
+      const auto torque_limited_t =
+        std::clamp(raw_only_t, -kWheelTorqueLimit, kWheelTorqueLimit);
+      velocity_limited_t = apply_wheel_velocity_limit(torque_limited_t, mJoints[id].velocity);
+      only_t = has_last_only_ts_
+                 ? apply_torque_slew_limit(
+                     velocity_limited_t, last_only_ts_[id], max_wheel_torque_delta)
+                 : velocity_limited_t;
+
+      std::ostringstream entry;
+      entry << " {idx=" << id << " q=" << mJoints[id].position
+            << " dq=" << mJoints[id].velocity << " tau_ff=" << mJoints[id].effortCommand
+            << " kp=" << mJoints[id].kp << " kd=" << mJoints[id].kd
+            << " qd=" << mJoints[id].positionCommand
+            << " qd_dot=" << mJoints[id].velocityCommand << " raw=" << raw_only_t
+            << " torque_limited=" << torque_limited_t
+            << " vel_limited=" << velocity_limited_t << " final=" << only_t << "}";
+      wheel_debug_entries.push_back(entry.str());
+    }
+
+    last_only_ts_[id] = only_t;
     only_ts.push_back(only_t);
   }
+  has_last_only_ts_ = true;
+
+  if (!wheel_debug_entries.empty()) {
+    std::ostringstream msg;
+    msg << "[HardwareBridge][wheel_protect]";
+    for (const auto & entry : wheel_debug_entries) {
+      msg << entry;
+    }
+    RCLCPP_INFO_THROTTLE(
+      rclcpp::get_logger("hardware_bridge"), clock_, 500, "%s", msg.str().c_str());
+  }
+
   if (pvt_ctrl_) {
     if (!robot_->set_target_joint_mit(p, v, kp, kd, t)) {
       RCLCPP_ERROR(rclcpp::get_logger("hardware_bridge"), "Failed to set target PVT on write");

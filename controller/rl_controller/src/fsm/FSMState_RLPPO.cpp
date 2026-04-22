@@ -37,10 +37,16 @@ void FSMState_RLPPO::update_forward()
       std::vector<std::vector<tensor_element_t>> input_datas;
       std::vector<tensor_element_t> input_data_1 = eigenToVector(obs_history_vec_);
       input_datas.push_back(input_data_1);
-      action_vec_ = vectorToEigen(inferrer_->computeActions(input_datas));
-      obs_.last_actions = action_vec_;
-      action_vec_ = reindex_action(action_vec_);
-      action_vec_ = re_sign_action(action_vec_);
+      auto raw_actions = vectorToEigen(inferrer_->computeActions(input_datas));
+      auto mapped_actions = reindex_action(raw_actions);
+      mapped_actions = re_sign_action(mapped_actions);
+      log_strict_policy_output(raw_actions, mapped_actions);
+      obs_.last_actions = raw_actions;
+      {
+        std::lock_guard<std::mutex> lock(action_mutex_);
+        raw_action_vec_ = raw_actions;
+        action_vec_ = mapped_actions;
+      }
 
       // DVec<tensor_element_t> action_scaled = action_vec_ * rl_params_->action_scale;
       // command_position_ = action_scaled + d2f(vectorToEigen(rl_params_->default_joint_angles));

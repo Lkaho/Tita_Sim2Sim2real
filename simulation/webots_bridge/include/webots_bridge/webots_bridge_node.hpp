@@ -103,6 +103,8 @@ private:
   std::vector<Joint> mJoints;
   InertiaUnit mImu;
   GPSSensor mGps;
+  double lastWheelDebugTime_{0.0};
+  double lastLegDebugTime_{0.0};
 };
 }  // namespace tita_webots_ros2_control
 

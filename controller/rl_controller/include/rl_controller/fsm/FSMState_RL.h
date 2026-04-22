@@ -15,6 +15,7 @@
 #ifndef RL_CONTROLLER__FSM__FSMSTATE_RL_H_
 #define RL_CONTROLLER__FSM__FSMSTATE_RL_H_
 
+#include <fstream>
 #include <memory>
 #include <mutex>
 #include <string>
@@ -99,6 +100,11 @@ protected:
   void sim_base_lin_vel_cb(const geometry_msgs::msg::Vector3::SharedPtr msg);
   void hw_base_lin_vel_cb(const std_msgs::msg::Float64::SharedPtr msg);
   bool should_accept_base_lin_vel_sample(double now_sec, double & last_time_sec, int rate_hz);
+  void open_strict_start_log();
+  void close_strict_start_log();
+  void log_strict_policy_output(
+    const DVec<tensor_element_t> & raw_actions,
+    const DVec<tensor_element_t> & mapped_actions);
 
   DVec<tensor_element_t> apply_reindex(
     const DVec<tensor_element_t> & vec, const std::vector<long int> & reindex_map) const
@@ -153,6 +159,7 @@ protected:
 
   DVec<tensor_element_t> obs_vec_;
   DVec<tensor_element_t> obs_history_vec_;
+  DVec<tensor_element_t> raw_action_vec_;
   DVec<tensor_element_t> action_vec_;
   std::vector<long int> obs_term_dims_;
   std::vector<DVec<tensor_element_t>> obs_terms_;
@@ -166,6 +173,8 @@ protected:
   bool has_base_lin_vel_xy_observation_ = false;
   bool use_sim_base_lin_vel_source_ = false;
   std::mutex base_lin_vel_mutex_;
+  std::mutex action_mutex_;
+  std::mutex strict_log_mutex_;
   Vec3<tensor_element_t> latest_base_lin_vel_world_ = Vec3<tensor_element_t>::Zero();
   Vec3<tensor_element_t> latest_base_lin_vel_body_ = Vec3<tensor_element_t>::Zero();
   double last_base_lin_vel_sim_update_time_ = -1.0;
@@ -176,6 +185,12 @@ protected:
 private:
   int iter_ = 0;
   double last_wheel_debug_time_ = 0.0;
+  double last_leg_debug_time_ = 0.0;
+  double last_obs_debug_time_ = 0.0;
+  std::ofstream strict_start_log_;
+  std::string strict_start_log_path_;
+  size_t strict_policy_step_ = 0;
+  static constexpr size_t kStrictPolicyLogLimit = 200;
 };
 
 #endif  // RL_CONTROLLER__FSM__FSMSTATE_RL_H_

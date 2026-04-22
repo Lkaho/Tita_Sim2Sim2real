@@ -76,21 +76,23 @@
         - "rl_flat"
 
       rl_flat:
-        policy_path: config/tita/policy_flat.onnx
+        # policy_path: config/tita/flat.onnx
+        policy_path: config/tita/policy_noVelInput.onnx
         output_name: "actions"
+        # output_name: "78"
         policy_type: "ppo"
+        # policy_type: "np3o"
         # env
-        num_obs: 33
+        num_obs: 31
         num_actions: 8
         history_len: 10
         observations_history_mode: "term"  #term or frame
         # observations_name: ["ang_vel", "gravity", "commands", "dof_pos_nwp", "dof_vel", "last_actions"]
         # For a policy trained with base_lin_vel_xy, switch to a matching 33-dim model and use:
-        observations_name: ["ang_vel", "gravity", "commands", "dof_pos_nwp", "dof_vel", "last_actions", "base_lin_vel_xy"]
-        # observations_name: ["ang_vel", "gravity", "commands", "dof_pos", "dof_vel", "last_actions"]
-        # observations_dims: [3, 3, 3, 6, 8, 8]
-        observations_dims: [3, 3, 3, 6, 8, 8, 2]
-        # observations_dims: [3, 3, 3, 8, 8, 8]
+        # observations_name: ["ang_vel", "gravity", "commands", "dof_pos_nwp", "dof_vel", "last_actions", "base_lin_vel_xy"]
+        observations_name: ["ang_vel", "gravity", "commands", "dof_pos_nwp", "dof_vel", "last_actions"]
+        # observations_dims: [3, 3, 3, 6, 8, 8, 2]
+        observations_dims: [3, 3, 3, 6, 8, 8]
         commands_name: ["lin_vel_x", "lin_vel_y", "ang_vel_z"]
         commands_scale: [2.0, 2.0, 0.25] # lin_vel_scale, lin_vel_scale, ang_vel_scale
         max_commands: [1.0, 0.0, 1.0]
@@ -110,8 +112,8 @@
         time_interval: 0.02 # match Isaac Lab policy step: sim.dt(0.005) * decimation(4)
         default_joint_angles: [0.0, 0.8, -1.5, 0.0, 0.0, 0.8, -1.5, 0.0]
         # joint_kp: [40.0, 40.0, 40.0, 12.0, 40.0, 40.0, 40.0, 12.0]
-        joint_kp: [40.0, 40.0, 40.0, 11.5, 40.0, 40.0, 40.0, 11.5]
-        joint_kd: [1.0, 1.0, 1.0, 0.5, 1.0, 1.0, 1.0, 0.5]
+        joint_kp: [40.0, 40.0, 40.0, 12.0, 40.0, 40.0, 40.0, 12.0]
+        joint_kd: [1.0, 1.0, 1.0, 0.6, 1.0, 1.0, 1.0, 0.6]
         # joint_kd: [1.0, 1.0, 1.0, 0.8, 1.0, 1.0, 1.0, 0.8]
         action_scales: [ 0.25, 0.5, 0.5, 0.5, 0.25, 0.5, 0.5, 0.5 ]
 

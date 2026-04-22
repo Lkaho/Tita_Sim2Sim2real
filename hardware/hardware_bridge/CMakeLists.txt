@@ -25,6 +25,11 @@ pluginlib_export_plugin_description_file(hardware_interface hardware_bridge_plug
 install(DIRECTORY config launch DESTINATION share/${PROJECT_NAME})
 
 if(BUILD_TESTING)
+  find_package(ament_cmake_gtest REQUIRED)
+  ament_add_gtest(bridge_torque_equivalence_test
+    test/bridge_torque_equivalence_test.cpp
+  )
+
   find_package(ament_lint_auto REQUIRED)
   ament_lint_auto_find_test_dependencies()
 endif()

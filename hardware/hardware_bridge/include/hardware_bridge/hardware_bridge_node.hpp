@@ -88,6 +88,8 @@ private:
   std::unique_ptr<tita_robot> robot_;
   rclcpp::Clock clock_{RCL_SYSTEM_TIME};
   bool pvt_ctrl_{true};
+  std::vector<double> last_only_ts_;
+  bool has_last_only_ts_{false};
 };
 }  // namespace tita_locomotion
 
