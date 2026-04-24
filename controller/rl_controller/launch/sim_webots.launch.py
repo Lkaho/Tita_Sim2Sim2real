@@ -81,6 +81,7 @@ def launch_setup(context, *args, **kwargs):
     robot_name = LaunchConfiguration("robot").perform(context)
     ns = LaunchConfiguration("ns").perform(context)
     terrain = LaunchConfiguration("terrain").perform(context)
+    controllers_file = LaunchConfiguration("controllers_file").perform(context)
     world_path = os.path.join(
         get_package_share_directory("webots_bridge"),
         "worlds",
@@ -119,7 +120,7 @@ def launch_setup(context, *args, **kwargs):
         get_package_share_directory("rl_controller"),
         "config",
         robot_name,
-        "controllers.yaml",
+        controllers_file,
     )
 
     tita_driver = WebotsController(
@@ -245,6 +246,13 @@ def generate_launch_description():
                 "stairs",
                 "uneven",
             ]
+        )
+    )
+    declared_arguments.append(
+        launch.actions.DeclareLaunchArgument(
+            "controllers_file",
+            default_value="controllers.yaml",
+            description="Controller YAML file under rl_controller/config/<robot>",
         )
     )
     return LaunchDescription(

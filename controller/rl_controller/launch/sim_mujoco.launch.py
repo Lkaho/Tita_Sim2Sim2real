@@ -16,6 +16,7 @@ from launch_ros.substitutions import FindPackageShare
 def launch_setup(context, *args, **kwargs):
     robot_name = LaunchConfiguration("robot").perform(context)
     ns = LaunchConfiguration("ns").perform(context)
+    controllers_file = LaunchConfiguration("controllers_file").perform(context)
     robot_xacro_path = os.path.join(
         get_package_share_directory(robot_name + "_description"),
         "xacro",
@@ -34,7 +35,7 @@ def launch_setup(context, *args, **kwargs):
         get_package_share_directory("rl_controller"),
         "config",
         robot_name,
-        "controllers.yaml",
+        controllers_file,
     )
 
     mujoco_simulate_app = Node(
@@ -126,6 +127,13 @@ def generate_launch_description():
             "ns",
             default_value="",
             description="Namespace of launch",
+        )
+    )
+    declared_arguments.append(
+        launch.actions.DeclareLaunchArgument(
+            "controllers_file",
+            default_value="controllers.yaml",
+            description="Controller YAML file under rl_controller/config/<robot>",
         )
     )
     return LaunchDescription(

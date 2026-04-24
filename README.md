@@ -134,6 +134,10 @@ ros2 launch teleop_command teleop_command.launch.py
     - `controller/rl_controller/config/tita/stand.onnx`
     - `controller/rl_controller/config/d1/flat.onnx`、`stairs.onnx`
 - 更新控制策略时，修改对应 `controllers.yaml` 与 ONNX 文件路径
+- TITA 双 ONNX 速度估计器策略可通过单独配置启动：
+```bash
+ros2 launch rl_controller hw.launch.py robot:=tita controllers_file:=controllers_estvel.yaml
+```
 - 状态机接口与实现：`controller/rl_controller/include/rl_controller/fsm/*` 与 `src/fsm/*`
 
 

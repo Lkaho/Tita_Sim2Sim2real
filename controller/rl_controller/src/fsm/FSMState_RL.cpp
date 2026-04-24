@@ -15,6 +15,8 @@
 #include "rl_controller/fsm/FSMState_RL.h"
 
 #include <algorithm>
+#include <array>
+#include <cmath>
 #include <filesystem>
 #include <iomanip>
 #include <iostream>
@@ -43,14 +45,6 @@ std::string vec_to_string(const DVec<tensor_element_t> & vec)
   return oss.str();
 }
 
-std::string vec_to_string(const Vec3<tensor_element_t> & vec)
-{
-  std::ostringstream oss;
-  oss << std::fixed << std::setprecision(4) << "[" << vec[0] << ", " << vec[1] << ", "
-      << vec[2] << "]";
-  return oss.str();
-}
-
 std::string vec_to_csv_cell(const DVec<tensor_element_t> & vec)
 {
   std::ostringstream oss;
@@ -70,6 +64,30 @@ std::string vec_to_csv_cell(const Vec3<tensor_element_t> & vec)
   oss << std::fixed << std::setprecision(6) << vec[0] << ';' << vec[1] << ';' << vec[2];
   return oss.str();
 }
+
+std::unique_ptr<InferrerBase> make_inferrer()
+{
+#ifdef USE_ENGINE
+  return std::make_unique<EngineInferrer>();
+#else
+  return std::make_unique<ONNXInferrer>();
+#endif
+}
+
+size_t tensor_element_count(
+  const std::vector<int64_t> & shape, const std::string & model_label, size_t input_index)
+{
+  size_t count = 1;
+  for (const auto dim : shape) {
+    if (dim <= 0) {
+      throw std::runtime_error(
+        "[FSMState_RL] " + model_label + " input " + std::to_string(input_index) +
+        " has unsupported dynamic/invalid dimension: " + std::to_string(dim));
+    }
+    count *= static_cast<size_t>(dim);
+  }
+  return count;
+}
 }  // namespace
 
 FSMState_RL::FSMState_RL(
@@ -78,13 +96,7 @@ FSMState_RL::FSMState_RL(
 {
   rl_params_ = rl_params;
   printf("Get policy: %s in \"%s\" fsm\n", rl_params_->policy_path.c_str(), stateName.c_str());
-#ifdef USE_ENGINE
-  // printf("Use TensorRT engine\n");
-  inferrer_ = std::make_unique<EngineInferrer>();
-#else
-  // printf("Use ONNX runtime\n");
-  inferrer_ = std::make_unique<ONNXInferrer>();
-#endif
+  inferrer_ = make_inferrer();
   // std::filesystem::path policy_path(rl_params_->policy_path);
   // std::string ext = policy_path.extension().string();  // 获取扩展名（含点，如 ".onnx"）
   // if (ext == ".onnx") {
@@ -135,6 +147,11 @@ FSMState_RL::FSMState_RL(
       std::to_string(rl_params_->num_obs) + " vs " + std::to_string(resolved_num_obs));
   }
 
+  has_base_lin_vel_xy_observation_ = requires_base_lin_vel_xy();
+  validate_velocity_estimator_config();
+  setup_velocity_estimator();
+  validate_model_inputs();
+
   obs_vec_.setZero(rl_params_->num_obs);
   obs_history_vec_.setZero(rl_params_->num_obs * rl_params_->history_len);
   raw_action_vec_.setZero(rl_params_->num_actions);
@@ -150,9 +167,12 @@ FSMState_RL::FSMState_RL(
     rl_params_->action_scales.resize(rl_params_->num_actions, base_scale);
   }
 
-  has_base_lin_vel_xy_observation_ = requires_base_lin_vel_xy();
-  if (has_base_lin_vel_xy_observation_) {
+  if (has_base_lin_vel_xy_observation_ && !rl_params_->use_velocity_estimator) {
     setup_base_lin_vel_subscription();
+  } else if (has_base_lin_vel_xy_observation_ && rl_params_->use_velocity_estimator) {
+    std::cout << "[FSMState_RL] base_lin_vel_xy is supplied by "
+              << rl_params_->estimator_policy_path << "; external velocity topic disabled"
+              << std::endl;
   }
 }
 
@@ -162,6 +182,7 @@ void FSMState_RL::enter()
   update_observations();
   initialize_observation_history();
   open_strict_start_log();
+  open_hardware_frame_log();
   threadRunning = true;
   stop_update_ = false;
   if (thread_first_) {
@@ -372,6 +393,7 @@ void FSMState_RL::exit()
 {
   stop_update_ = true;
   close_strict_start_log();
+  close_hardware_frame_log();
   // std::cout << "exit RL" << std::endl;
 }
 
@@ -402,6 +424,38 @@ void FSMState_RL::open_strict_start_log()
             << " policy outputs to " << strict_start_log_path_ << std::endl;
 }
 
+void FSMState_RL::open_hardware_frame_log()
+{
+  std::lock_guard<std::mutex> lock(hardware_log_mutex_);
+  hardware_frame_step_ = 0;
+  if (hardware_frame_log_.is_open()) {
+    hardware_frame_log_.close();
+  }
+
+  if (!is_hardware_runtime()) {
+    hardware_frame_log_path_.clear();
+    return;
+  }
+
+  hardware_frame_log_path_ = "/tmp/fsmstate_rl_hw_obs_action_" + _stateName + ".csv";
+  hardware_frame_log_.open(hardware_frame_log_path_, std::ios::out | std::ios::trunc);
+  if (!hardware_frame_log_.is_open()) {
+    std::cerr << "[FSMState_RL][hw_frame_log] failed to open " << hardware_frame_log_path_
+              << std::endl;
+    return;
+  }
+
+  hardware_frame_log_ << "frame_step,time_sec,runtime,state,raw_q,raw_dq,raw_pos_rel,policy_pos_rel,"
+                         "policy_dq";
+  for (const auto & observation_name : rl_params_->observations_name) {
+    hardware_frame_log_ << ",obs_" << observation_name;
+  }
+  hardware_frame_log_ << ",obs_vec,obs_history_vec,raw_actions,mapped_actions\n";
+  hardware_frame_log_.flush();
+  std::cout << "[FSMState_RL][hw_frame_log] writing per-frame obs/actions to "
+            << hardware_frame_log_path_ << std::endl;
+}
+
 void FSMState_RL::close_strict_start_log()
 {
   std::lock_guard<std::mutex> lock(strict_log_mutex_);
@@ -410,6 +464,17 @@ void FSMState_RL::close_strict_start_log()
     strict_start_log_.close();
     std::cout << "[FSMState_RL][strict_log] wrote " << strict_policy_step_
               << " policy outputs to " << strict_start_log_path_ << std::endl;
+  }
+}
+
+void FSMState_RL::close_hardware_frame_log()
+{
+  std::lock_guard<std::mutex> lock(hardware_log_mutex_);
+  if (hardware_frame_log_.is_open()) {
+    hardware_frame_log_.flush();
+    hardware_frame_log_.close();
+    std::cout << "[FSMState_RL][hw_frame_log] wrote " << hardware_frame_step_
+              << " frames to " << hardware_frame_log_path_ << std::endl;
   }
 }
 
@@ -506,6 +571,142 @@ void FSMState_RL::log_strict_policy_output(
   }
 }
 
+bool FSMState_RL::is_hardware_runtime() const
+{
+  if (!_data || !_data->node) {
+    return false;
+  }
+
+  bool use_sim_time = false;
+  _data->node->get_parameter("use_sim_time", use_sim_time);
+  return !use_sim_time;
+}
+
+std::string FSMState_RL::runtime_label() const
+{
+  return is_hardware_runtime() ? "hardware" : "sim";
+}
+
+std::string FSMState_RL::leg_label(size_t leg_index, size_t leg_count) const
+{
+  if (leg_count == 2) {
+    return leg_index == 0 ? "left_leg" : "right_leg";
+  }
+  if (leg_count == 4) {
+    static const std::array<std::string, 4> kQuadrupedLegLabels = {
+      "front_left", "front_right", "rear_left", "rear_right"};
+    if (leg_index < kQuadrupedLegLabels.size()) {
+      return kQuadrupedLegLabels[leg_index];
+    }
+  }
+  return "leg_" + std::to_string(leg_index);
+}
+
+void FSMState_RL::print_latest_frame_debug(
+  const DVec<tensor_element_t> & raw_actions,
+  const DVec<tensor_element_t> & mapped_actions)
+{
+  const double now_sec = getTimeSecond();
+  if (now_sec - last_obs_debug_time_ <= 0.5) {
+    return;
+  }
+  last_obs_debug_time_ = now_sec;
+
+  const DVec<tensor_element_t> raw_q = d2f(_data->low_state->q);
+  const DVec<tensor_element_t> raw_dq = d2f(_data->low_state->dq);
+  const DVec<tensor_element_t> default_q = d2f(vectorToEigen(rl_params_->default_joint_angles));
+  const DVec<tensor_element_t> raw_pos_rel = raw_q - default_q;
+
+  DVec<tensor_element_t> policy_pos_rel = obs_.dof_pos - default_q;
+  DVec<tensor_element_t> policy_dq = obs_.dof_vel;
+  policy_pos_rel = reindex_observation(policy_pos_rel);
+  policy_pos_rel = re_sign_observation(policy_pos_rel);
+  policy_dq = reindex_observation(policy_dq);
+  policy_dq = re_sign_observation(policy_dq);
+
+  size_t leg_count = !_data->params->hip_indices.empty() ? _data->params->hip_indices.size() : 0;
+  if (leg_count == 0) {
+    if (raw_q.size() > 0 && raw_q.size() % 4 == 0) {
+      leg_count = static_cast<size_t>(raw_q.size() / 4);
+    } else if (raw_q.size() > 0 && raw_q.size() % 3 == 0) {
+      leg_count = static_cast<size_t>(raw_q.size() / 3);
+    } else {
+      leg_count = 1;
+    }
+  }
+  const size_t leg_dof = std::max<size_t>(1, static_cast<size_t>(raw_q.size()) / leg_count);
+
+  std::ostringstream frame_stream;
+  frame_stream << "[FSMState_RL][frame_debug]\n";
+  frame_stream << std::fixed << std::setprecision(4);
+  frame_stream << "  runtime=" << runtime_label() << " state=" << _stateName
+               << " time_sec=" << now_sec << '\n';
+  for (size_t leg_index = 0; leg_index < leg_count; ++leg_index) {
+    const Eigen::Index offset = static_cast<Eigen::Index>(leg_index * leg_dof);
+    const Eigen::Index count = std::min<Eigen::Index>(
+      static_cast<Eigen::Index>(leg_dof), raw_q.size() - offset);
+    if (offset >= raw_q.size() || count <= 0) {
+      continue;
+    }
+
+    const DVec<tensor_element_t> leg_q = raw_q.segment(offset, count);
+    const DVec<tensor_element_t> leg_default = default_q.segment(offset, count);
+    const DVec<tensor_element_t> leg_delta = raw_pos_rel.segment(offset, count);
+    frame_stream << "  " << leg_label(leg_index, leg_count) << " q=" << vec_to_string(leg_q)
+                 << " default=" << vec_to_string(leg_default)
+                 << " delta=" << vec_to_string(leg_delta) << '\n';
+  }
+  for (size_t i = 0; i < obs_terms_.size(); ++i) {
+    frame_stream << "  obs." << rl_params_->observations_name[i] << "="
+                 << vec_to_string(obs_terms_[i]) << '\n';
+  }
+  frame_stream << "  obs.obs_vec=" << vec_to_string(obs_vec_) << '\n';
+  frame_stream << "  policy.raw_actions=" << vec_to_string(raw_actions) << '\n';
+  frame_stream << "  policy.mapped_actions=" << vec_to_string(mapped_actions);
+  std::cout << frame_stream.str() << std::endl;
+}
+
+void FSMState_RL::log_hardware_frame(
+  const DVec<tensor_element_t> & raw_actions,
+  const DVec<tensor_element_t> & mapped_actions)
+{
+  if (!is_hardware_runtime()) {
+    return;
+  }
+
+  std::lock_guard<std::mutex> lock(hardware_log_mutex_);
+  if (!hardware_frame_log_.is_open()) {
+    return;
+  }
+
+  const DVec<tensor_element_t> raw_q = d2f(_data->low_state->q);
+  const DVec<tensor_element_t> raw_dq = d2f(_data->low_state->dq);
+  const DVec<tensor_element_t> default_q = d2f(vectorToEigen(rl_params_->default_joint_angles));
+  const DVec<tensor_element_t> raw_pos_rel = raw_q - default_q;
+
+  DVec<tensor_element_t> policy_pos_rel = obs_.dof_pos - default_q;
+  DVec<tensor_element_t> policy_dq = obs_.dof_vel;
+  policy_pos_rel = reindex_observation(policy_pos_rel);
+  policy_pos_rel = re_sign_observation(policy_pos_rel);
+  policy_dq = reindex_observation(policy_dq);
+  policy_dq = re_sign_observation(policy_dq);
+
+  hardware_frame_log_ << std::fixed << std::setprecision(9) << hardware_frame_step_++ << ','
+                      << getTimeSecond() << ',' << runtime_label() << ',' << _stateName << ",\""
+                      << vec_to_csv_cell(raw_q) << "\",\"" << vec_to_csv_cell(raw_dq) << "\",\""
+                      << vec_to_csv_cell(raw_pos_rel) << "\",\""
+                      << vec_to_csv_cell(policy_pos_rel) << "\",\""
+                      << vec_to_csv_cell(policy_dq) << '"';
+  for (const auto & obs_term : obs_terms_) {
+    hardware_frame_log_ << ",\"" << vec_to_csv_cell(obs_term) << '"';
+  }
+  hardware_frame_log_ << ",\"" << vec_to_csv_cell(obs_vec_) << "\",\""
+                      << vec_to_csv_cell(obs_history_vec_) << "\",\""
+                      << vec_to_csv_cell(raw_actions) << "\",\""
+                      << vec_to_csv_cell(mapped_actions) << "\"\n";
+  hardware_frame_log_.flush();
+}
+
 std::string FSMState_RL::checkTransition()
 {
   this->_nextStateName = this->_stateName;
@@ -539,6 +740,226 @@ bool FSMState_RL::transition()
   }  // For some phase policy, we need to wait for the episode to finish
   // You can add the height decend for 8dof robots to get a smooth landing
   return true;
+}
+
+void FSMState_RL::validate_velocity_estimator_config() const
+{
+  if (!rl_params_->use_velocity_estimator) {
+    return;
+  }
+
+#ifdef USE_ENGINE
+  throw std::runtime_error(
+    "[FSMState_RL] use_velocity_estimator currently supports ONNX runtime builds only; "
+    "rebuild rl_controller with USE_ENGINE=OFF");
+#endif
+
+  if (!use_term_history_layout()) {
+    throw std::runtime_error(
+      "[FSMState_RL] use_velocity_estimator requires observations_history_mode=\"term\"");
+  }
+  if (!has_base_lin_vel_xy_observation_) {
+    throw std::runtime_error(
+      "[FSMState_RL] use_velocity_estimator requires base_lin_vel_xy in observations_name");
+  }
+  if (rl_params_->estimator_policy_path.empty()) {
+    throw std::runtime_error(
+      "[FSMState_RL] estimator_policy_path is required when use_velocity_estimator=true");
+  }
+  if (rl_params_->estimator_output_name.empty()) {
+    throw std::runtime_error(
+      "[FSMState_RL] estimator_output_name is required when use_velocity_estimator=true");
+  }
+  if (rl_params_->estimator_history_len <= 0) {
+    throw std::runtime_error(
+      "[FSMState_RL] estimator_history_len must be positive when use_velocity_estimator=true");
+  }
+  if (rl_params_->estimator_history_len > rl_params_->history_len) {
+    throw std::runtime_error(
+      "[FSMState_RL] estimator_history_len must be <= history_len, estimator=" +
+      std::to_string(rl_params_->estimator_history_len) +
+      ", history=" + std::to_string(rl_params_->history_len));
+  }
+  if (std::fabs(static_cast<double>(rl_params_->lin_vel_scale)) < 1e-6) {
+    throw std::runtime_error(
+      "[FSMState_RL] lin_vel_scale must be non-zero when use_velocity_estimator=true");
+  }
+}
+
+void FSMState_RL::setup_velocity_estimator()
+{
+  if (!rl_params_->use_velocity_estimator) {
+    return;
+  }
+
+  estimator_inferrer_ = make_inferrer();
+  estimator_inferrer_->loadModel(rl_params_->estimator_policy_path);
+  estimator_inferrer_->setOutput(rl_params_->estimator_output_name, 2);
+  std::cout << "[FSMState_RL] velocity estimator enabled: estimator_policy_path="
+            << rl_params_->estimator_policy_path << ", actor_policy_path="
+            << rl_params_->policy_path << ", estimator_history_len="
+            << rl_params_->estimator_history_len << std::endl;
+}
+
+void FSMState_RL::validate_model_inputs() const
+{
+  if (!rl_params_->use_velocity_estimator) {
+    return;
+  }
+
+  const auto & actor_input_shapes = inferrer_->getInputShapes();
+  if (rl_params_->policy_type == "ppo") {
+    if (actor_input_shapes.size() != 1) {
+      throw std::runtime_error(
+        "[FSMState_RL] PPO actor model must have one input, got " +
+        std::to_string(actor_input_shapes.size()));
+    }
+    const size_t actor_input_dim = tensor_element_count(actor_input_shapes[0], "actor", 0);
+    if (actor_input_dim != actor_history_input_dim()) {
+      throw std::runtime_error(
+        "[FSMState_RL] PPO actor input dim mismatch, configured=" +
+        std::to_string(actor_history_input_dim()) +
+        ", model=" + std::to_string(actor_input_dim));
+    }
+  } else if (rl_params_->policy_type == "np3o") {
+    if (actor_input_shapes.size() != 2) {
+      throw std::runtime_error(
+        "[FSMState_RL] NP3O actor model must have two inputs, got " +
+        std::to_string(actor_input_shapes.size()));
+    }
+    const size_t actor_obs_dim = tensor_element_count(actor_input_shapes[0], "actor", 0);
+    const size_t actor_history_dim = tensor_element_count(actor_input_shapes[1], "actor", 1);
+    if (actor_obs_dim != static_cast<size_t>(rl_params_->num_obs)) {
+      throw std::runtime_error(
+        "[FSMState_RL] NP3O actor obs input dim mismatch, configured=" +
+        std::to_string(rl_params_->num_obs) + ", model=" + std::to_string(actor_obs_dim));
+    }
+    if (actor_history_dim != actor_history_input_dim()) {
+      throw std::runtime_error(
+        "[FSMState_RL] NP3O actor history input dim mismatch, configured=" +
+        std::to_string(actor_history_input_dim()) +
+        ", model=" + std::to_string(actor_history_dim));
+    }
+  }
+
+  if (!estimator_inferrer_) {
+    throw std::runtime_error("[FSMState_RL] estimator inferrer was not initialized");
+  }
+  const auto & estimator_input_shapes = estimator_inferrer_->getInputShapes();
+  if (estimator_input_shapes.size() != 1) {
+    throw std::runtime_error(
+      "[FSMState_RL] estimator model must have one input, got " +
+      std::to_string(estimator_input_shapes.size()));
+  }
+  const size_t estimator_input_dim =
+    tensor_element_count(estimator_input_shapes[0], "estimator", 0);
+  if (estimator_input_dim != estimator_history_input_dim()) {
+    throw std::runtime_error(
+      "[FSMState_RL] estimator input dim mismatch, configured=" +
+      std::to_string(estimator_history_input_dim()) +
+      ", model=" + std::to_string(estimator_input_dim));
+  }
+}
+
+size_t FSMState_RL::actor_history_input_dim() const
+{
+  return static_cast<size_t>(rl_params_->num_obs) * static_cast<size_t>(rl_params_->history_len);
+}
+
+size_t FSMState_RL::estimator_history_input_dim() const
+{
+  size_t input_dim = 0;
+  for (size_t i = 0; i < rl_params_->observations_name.size(); ++i) {
+    if (rl_params_->observations_name[i] == "base_lin_vel_xy") {
+      continue;
+    }
+    input_dim +=
+      static_cast<size_t>(obs_term_dims_[i]) * static_cast<size_t>(rl_params_->estimator_history_len);
+  }
+  return input_dim;
+}
+
+std::vector<tensor_element_t> FSMState_RL::build_estimator_history_input() const
+{
+  if (!use_term_history_layout()) {
+    throw std::runtime_error(
+      "[FSMState_RL] estimator input assembly requires term history layout");
+  }
+
+  std::vector<tensor_element_t> estimator_input;
+  estimator_input.reserve(estimator_history_input_dim());
+  for (size_t i = 0; i < obs_term_history_vecs_.size(); ++i) {
+    if (rl_params_->observations_name[i] == "base_lin_vel_xy") {
+      continue;
+    }
+    const size_t term_dim = static_cast<size_t>(obs_term_dims_[i]);
+    const size_t copy_count = term_dim * static_cast<size_t>(rl_params_->estimator_history_len);
+    const auto & term_history = obs_term_history_vecs_[i];
+    if (static_cast<size_t>(term_history.size()) < copy_count) {
+      throw std::runtime_error(
+        "[FSMState_RL] estimator history for \"" + rl_params_->observations_name[i] +
+        "\" is shorter than estimator_history_len");
+    }
+    const size_t offset = static_cast<size_t>(term_history.size()) - copy_count;
+    for (size_t j = 0; j < copy_count; ++j) {
+      estimator_input.push_back(term_history[static_cast<Eigen::Index>(offset + j)]);
+    }
+  }
+  return estimator_input;
+}
+
+bool FSMState_RL::run_velocity_estimator()
+{
+  if (!rl_params_->use_velocity_estimator) {
+    return false;
+  }
+  if (!estimator_inferrer_) {
+    throw std::runtime_error("[FSMState_RL] estimator inferrer is not initialized");
+  }
+
+  std::vector<std::vector<tensor_element_t>> input_datas;
+  input_datas.push_back(build_estimator_history_input());
+  const auto estimated_velocity = estimator_inferrer_->computeActions(input_datas);
+  if (estimated_velocity.size() != 2) {
+    throw std::runtime_error(
+      "[FSMState_RL] estimator output size mismatch, expected 2, got " +
+      std::to_string(estimated_velocity.size()));
+  }
+
+  estimated_base_lin_vel_body_[0] = estimated_velocity[0];
+  estimated_base_lin_vel_body_[1] = estimated_velocity[1];
+  estimated_base_lin_vel_body_[2] = static_cast<tensor_element_t>(0.0);
+  refresh_estimated_base_lin_vel_observation();
+  return true;
+}
+
+void FSMState_RL::refresh_estimated_base_lin_vel_observation()
+{
+  if (!rl_params_->use_velocity_estimator || !has_base_lin_vel_xy_observation_) {
+    return;
+  }
+
+  obs_.lin_vel = estimated_base_lin_vel_body_;
+  Eigen::Index offset = 0;
+  for (size_t i = 0; i < rl_params_->observations_name.size(); ++i) {
+    const Eigen::Index term_dim = static_cast<Eigen::Index>(obs_term_dims_[i]);
+    if (rl_params_->observations_name[i] != "base_lin_vel_xy") {
+      offset += term_dim;
+      continue;
+    }
+
+    DVec<tensor_element_t> base_lin_vel_xy(2);
+    base_lin_vel_xy << obs_.lin_vel[0], obs_.lin_vel[1];
+    obs_terms_[i] = base_lin_vel_xy * static_cast<tensor_element_t>(rl_params_->lin_vel_scale);
+    obs_vec_.segment(offset, term_dim) = obs_terms_[i];
+
+    auto & term_history = obs_term_history_vecs_[i];
+    if (term_history.size() >= term_dim) {
+      term_history.tail(term_dim) = obs_terms_[i];
+      flatten_term_history();
+    }
+    return;
+  }
 }
 
 long int FSMState_RL::infer_observation_dim(const std::string & observation_name) const
@@ -777,9 +1198,13 @@ void FSMState_RL::update_observations()
   auto rBody = d2f(ori::quaternionToRotationMatrix(_data->low_state->quat));
   obs_.gravity = rBody * Vec3<tensor_element_t>(0.0, 0.0, -1.0);
   if (has_base_lin_vel_xy_observation_) {
-    std::lock_guard<std::mutex> lock(base_lin_vel_mutex_);
-    obs_.lin_vel = use_sim_base_lin_vel_source_ ? rBody * latest_base_lin_vel_world_
-                                                : latest_base_lin_vel_body_;
+    if (rl_params_->use_velocity_estimator) {
+      obs_.lin_vel = estimated_base_lin_vel_body_;
+    } else {
+      std::lock_guard<std::mutex> lock(base_lin_vel_mutex_);
+      obs_.lin_vel = use_sim_base_lin_vel_source_ ? rBody * latest_base_lin_vel_world_
+                                                  : latest_base_lin_vel_body_;
+    }
   }
 
   // command
@@ -842,33 +1267,6 @@ void FSMState_RL::update_observations()
     offset += obs.size();
   }
 
-  const double now_sec = getTimeSecond();
-  if (now_sec - last_obs_debug_time_ > 0.5) {
-    last_obs_debug_time_ = now_sec;
-
-    DVec<tensor_element_t> raw_pos_rel =
-      obs_.dof_pos - d2f(vectorToEigen(rl_params_->default_joint_angles));
-    DVec<tensor_element_t> raw_vel = obs_.dof_vel;
-    std::ostringstream obs_stream;
-    obs_stream << "[FSMState_RL][obs_debug]"
-               << " mode=" << rl_params_->observations_history_mode
-               << " history_len=" << rl_params_->history_len
-               << " obs_size=" << obs_vec_.size()
-               << " history_size=" << obs_history_vec_.size()
-               << " raw_q=" << vec_to_string(obs_.dof_pos)
-               << " raw_dq=" << vec_to_string(obs_.dof_vel)
-               << " raw_pos_rel=" << vec_to_string(raw_pos_rel)
-               << " reindexed_pos_rel=" << vec_to_string(pos)
-               << " reindexed_dq=" << vec_to_string(raw_vel.size() == vel.size() ? vel : raw_vel)
-               << " ang_vel_unscaled=" << vec_to_string(obs_.ang_vel)
-               << " gravity=" << vec_to_string(obs_.gravity)
-               << " commands_scaled=" << vec_to_string(obs_.commands);
-    for (size_t i = 0; i < obs_terms_.size(); ++i) {
-      obs_stream << " term." << rl_params_->observations_name[i] << "="
-                 << vec_to_string(obs_terms_[i]);
-    }
-    std::cout << obs_stream.str() << std::endl;
-  }
   // // clang-format off
   // obs_vec_ << obs_.ang_vel * rl_params_->ang_vel_scale,
   //             obs_.gravity,
@@ -887,6 +1285,10 @@ void FSMState_RL::update_forward()
 
     if (!stop_update_) {
       update_observations();
+      if (rl_params_->use_velocity_estimator) {
+        append_observation_history();
+        run_velocity_estimator();
+      }
       std::vector<std::vector<tensor_element_t>> input_datas;
       std::vector<tensor_element_t> input_data_1 = eigenToVector(obs_vec_);
       std::vector<tensor_element_t> input_data_2 = eigenToVector(obs_history_vec_);
@@ -896,13 +1298,17 @@ void FSMState_RL::update_forward()
       auto mapped_actions = reindex_action(raw_actions);
       mapped_actions = re_sign_action(mapped_actions);
       log_strict_policy_output(raw_actions, mapped_actions);
+      print_latest_frame_debug(raw_actions, mapped_actions);
+      log_hardware_frame(raw_actions, mapped_actions);
       obs_.last_actions = raw_actions;
       {
         std::lock_guard<std::mutex> lock(action_mutex_);
         raw_action_vec_ = raw_actions;
         action_vec_ = mapped_actions;
       }
-      append_observation_history();
+      if (!rl_params_->use_velocity_estimator) {
+        append_observation_history();
+      }
     }
     absoluteWait(_start_time, interval);
   }

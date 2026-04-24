@@ -70,6 +70,7 @@ private:
   void cmd_vel_cb();
   void posestamped_cb();
   void fsm_goal_cb();
+  void print_interface() const;
   // publishers
   std::shared_ptr<rclcpp::Publisher<sensor_msgs::msg::Joy>> joy_publisher_;
   std::shared_ptr<rclcpp::Publisher<geometry_msgs::msg::Twist>> cmd_vel_publisher_;

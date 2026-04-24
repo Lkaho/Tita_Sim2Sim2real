@@ -16,6 +16,8 @@
 
 #include <ament_index_cpp/get_package_share_directory.hpp>
 
+#include <filesystem>
+
 #include "pluginlib/class_list_macros.hpp"
 namespace rl_controller
 {
@@ -400,11 +402,32 @@ void RlController::update_control_parameters()
   get_node()->get_parameter<std::vector<scalar_t>>("joint_pd.joint_kd", jp_params.joint_kd);
   // RLParameters
   auto get_policy_params = [this](const std::string & policy_name, RLParameters & rl_params) {
+    const auto package_share_dir = ament_index_cpp::get_package_share_directory("rl_controller");
+    const auto resolve_policy_path =
+      [&package_share_dir](const std::string & configured_path) -> std::string {
+      if (configured_path.empty()) {
+        return configured_path;
+      }
+      const std::filesystem::path model_path(configured_path);
+      if (model_path.is_absolute()) {
+        return configured_path;
+      }
+      return (std::filesystem::path(package_share_dir) / model_path).string();
+    };
+
     get_node()->get_parameter<std::string>(policy_name + ".policy_path", rl_params.policy_path);
-    rl_params.policy_path =
-      ament_index_cpp::get_package_share_directory("rl_controller") + "/" + rl_params.policy_path;
+    rl_params.policy_path = resolve_policy_path(rl_params.policy_path);
     get_node()->get_parameter<std::string>(policy_name + ".output_name", rl_params.output_name);
     get_node()->get_parameter<std::string>(policy_name + ".policy_type", rl_params.policy_type);
+    get_node()->get_parameter<bool>(
+      policy_name + ".use_velocity_estimator", rl_params.use_velocity_estimator);
+    get_node()->get_parameter<std::string>(
+      policy_name + ".estimator_policy_path", rl_params.estimator_policy_path);
+    rl_params.estimator_policy_path = resolve_policy_path(rl_params.estimator_policy_path);
+    get_node()->get_parameter<std::string>(
+      policy_name + ".estimator_output_name", rl_params.estimator_output_name);
+    get_node()->get_parameter<int>(
+      policy_name + ".estimator_history_len", rl_params.estimator_history_len);
     // env
     get_node()->get_parameter<int>(policy_name + ".num_obs", rl_params.num_obs);
     get_node()->get_parameter<int>(policy_name + ".num_actions", rl_params.num_actions);

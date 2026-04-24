@@ -15,6 +15,7 @@ from launch.actions import OpaqueFunction
 def launch_setup(context, *args, **kwargs):
     robot_name = LaunchConfiguration("robot").perform(context)
     ns = LaunchConfiguration("ns").perform(context)
+    controllers_file = LaunchConfiguration("controllers_file").perform(context)
 
     # Get world file path
     world_file = os.path.join(
@@ -75,9 +76,15 @@ def launch_setup(context, *args, **kwargs):
             "file://" + get_package_share_directory(desc_pkg),
         )
 
+    robot_controllers = os.path.join(
+        get_package_share_directory("rl_controller"),
+        "config",
+        robot_name,
+        controllers_file,
+    )
     robot_description = robot_description.replace(
         get_package_share_directory("gazebo_bridge")+ "/config/controllers.yaml",
-        get_package_share_directory("rl_controller")+ "/config/" + robot_name + "/controllers.yaml",
+        robot_controllers,
     )
     # print(robot_description)
 
@@ -147,6 +154,13 @@ def generate_launch_description():
             "ns",
             default_value="",
             description="Namespace of launch",
+        )
+    )
+    declared_arguments.append(
+        launch.actions.DeclareLaunchArgument(
+            "controllers_file",
+            default_value="controllers.yaml",
+            description="Controller YAML file under rl_controller/config/<robot>",
         )
     )
     return LaunchDescription(

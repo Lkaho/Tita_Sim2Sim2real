@@ -33,6 +33,7 @@ void FSMState_RLPPO::update_forward()
     if (!stop_update_) {
       update_observations();
       append_observation_history();
+      run_velocity_estimator();
 
       std::vector<std::vector<tensor_element_t>> input_datas;
       std::vector<tensor_element_t> input_data_1 = eigenToVector(obs_history_vec_);
@@ -41,6 +42,8 @@ void FSMState_RLPPO::update_forward()
       auto mapped_actions = reindex_action(raw_actions);
       mapped_actions = re_sign_action(mapped_actions);
       log_strict_policy_output(raw_actions, mapped_actions);
+      print_latest_frame_debug(raw_actions, mapped_actions);
+      log_hardware_frame(raw_actions, mapped_actions);
       obs_.last_actions = raw_actions;
       {
         std::lock_guard<std::mutex> lock(action_mutex_);

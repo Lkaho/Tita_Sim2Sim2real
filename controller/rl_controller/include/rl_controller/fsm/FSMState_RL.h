@@ -93,9 +93,17 @@ protected:
   void initialize_observation_history();
   void append_observation_history();
   void flatten_term_history();
+  void validate_velocity_estimator_config() const;
+  void setup_velocity_estimator();
+  void validate_model_inputs() const;
+  std::vector<tensor_element_t> build_estimator_history_input() const;
+  bool run_velocity_estimator();
+  void refresh_estimated_base_lin_vel_observation();
   long int infer_observation_dim(const std::string & observation_name) const;
   bool use_term_history_layout() const;
   bool requires_base_lin_vel_xy() const;
+  size_t actor_history_input_dim() const;
+  size_t estimator_history_input_dim() const;
   void setup_base_lin_vel_subscription();
   void sim_base_lin_vel_cb(const geometry_msgs::msg::Vector3::SharedPtr msg);
   void hw_base_lin_vel_cb(const std_msgs::msg::Float64::SharedPtr msg);
@@ -105,6 +113,17 @@ protected:
   void log_strict_policy_output(
     const DVec<tensor_element_t> & raw_actions,
     const DVec<tensor_element_t> & mapped_actions);
+  void open_hardware_frame_log();
+  void close_hardware_frame_log();
+  void log_hardware_frame(
+    const DVec<tensor_element_t> & raw_actions,
+    const DVec<tensor_element_t> & mapped_actions);
+  void print_latest_frame_debug(
+    const DVec<tensor_element_t> & raw_actions,
+    const DVec<tensor_element_t> & mapped_actions);
+  bool is_hardware_runtime() const;
+  std::string runtime_label() const;
+  std::string leg_label(size_t leg_index, size_t leg_count) const;
 
   DVec<tensor_element_t> apply_reindex(
     const DVec<tensor_element_t> & vec, const std::vector<long int> & reindex_map) const
@@ -166,6 +185,7 @@ protected:
   std::vector<DVec<tensor_element_t>> obs_term_history_vecs_;
 
   std::unique_ptr<InferrerBase> inferrer_;
+  std::unique_ptr<InferrerBase> estimator_inferrer_;
   std::thread forward_thread;
   bool threadRunning;
   bool stop_update_ = false;
@@ -175,8 +195,10 @@ protected:
   std::mutex base_lin_vel_mutex_;
   std::mutex action_mutex_;
   std::mutex strict_log_mutex_;
+  std::mutex hardware_log_mutex_;
   Vec3<tensor_element_t> latest_base_lin_vel_world_ = Vec3<tensor_element_t>::Zero();
   Vec3<tensor_element_t> latest_base_lin_vel_body_ = Vec3<tensor_element_t>::Zero();
+  Vec3<tensor_element_t> estimated_base_lin_vel_body_ = Vec3<tensor_element_t>::Zero();
   double last_base_lin_vel_sim_update_time_ = -1.0;
   double last_base_lin_vel_hw_update_time_ = -1.0;
   rclcpp::Subscription<geometry_msgs::msg::Vector3>::SharedPtr base_lin_vel_sim_subscription_;
@@ -190,6 +212,9 @@ private:
   std::ofstream strict_start_log_;
   std::string strict_start_log_path_;
   size_t strict_policy_step_ = 0;
+  std::ofstream hardware_frame_log_;
+  std::string hardware_frame_log_path_;
+  size_t hardware_frame_step_ = 0;
   static constexpr size_t kStrictPolicyLogLimit = 200;
 };
 

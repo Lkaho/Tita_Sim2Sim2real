@@ -10,6 +10,7 @@ import sys
 
 def launch_setup(context, *args, **kwargs):
     robot_name = LaunchConfiguration("robot").perform(context)
+    controllers_file = LaunchConfiguration("controllers_file").perform(context)
     # nn = LaunchConfiguration("namespace").perform(context)
     nn = ""
 
@@ -27,7 +28,7 @@ def launch_setup(context, *args, **kwargs):
         get_package_share_directory("rl_controller"),
         "config",
         robot_name,
-        "controllers.yaml",
+        controllers_file,
     )
     control_node = Node(
         package="controller_manager",
@@ -96,6 +97,13 @@ def generate_launch_description():
             "robot",
             default_value="tita",
             description="Path to the robot description file",
+        )
+    )
+    declared_arguments.append(
+        DeclareLaunchArgument(
+            "controllers_file",
+            default_value="controllers.yaml",
+            description="Controller YAML file under rl_controller/config/<robot>",
         )
     )
     # declared_arguments.append(

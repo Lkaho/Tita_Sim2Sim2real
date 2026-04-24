@@ -15,7 +15,8 @@
 #include "teleop_command/teleop_command_node.hpp"
 namespace teleop_command
 {
-TeleopCmdNode::TeleopCmdNode(const rclcpp::NodeOptions & options) : Node("teleop_command", options)
+TeleopCmdNode::TeleopCmdNode(const rclcpp::NodeOptions & options)
+: Node("teleop_command", options), last_key(0)
 {
 }
 void TeleopCmdNode::init()
@@ -62,13 +63,50 @@ void TeleopCmdNode::init()
     std::bind(&TeleopCmdNode::fsm_goal_cb, this));
 
   // others
+  this->crsf_transfer_data_ = {};
   this->crsf_transfer_data_.quadruped_mode = 0;
   this->crsf_transfer_data_.button_mode = 0;
+  this->crsf_transfer_data_.use_sdk = params_.use_sdk ? 1 : 0;
   crsf_ = std::make_unique<CRSF>(params_.uart_interface);
   crsf_->onDataReceived(std::bind(&TeleopCmdNode::crsf_dataread_cb, this, std::placeholders::_1));
   crsf_->onModeReceived(std::bind(&TeleopCmdNode::crsf_moderead_cb, this, std::placeholders::_1));
   crsf_->begin();
+  print_interface();
 }
+
+void TeleopCmdNode::print_interface() const
+{
+  RCLCPP_INFO(
+    this->get_logger(), "%s",
+    R"(
+==================== teleop_command 操作提示 ====================
+输入:
+  ELRS/CRSF 串口输入会转换成 sensor_msgs/Joy，并同步发布速度、姿态和状态机命令。
+  以下 +1/0/-1 表示代码中的 Joy axes 值，实际拨杆位置取决于遥控器混控。
+
+基础运动:
+  CH1 -> Joy axes[0]: CH6=0 时控制左右速度 linear.y；CH6=-1 时控制 roll
+  CH2 -> Joy axes[1]: CH6=0 时控制高度速度 linear.z；CH6=-1 时控制 pitch
+  CH3 -> Joy axes[2]: 控制前后速度 linear.x
+  CH4 -> Joy axes[3]: 控制偏航角速度 angular.z
+  CH8 -> Joy axes[7]: 速度档位，+1=低速，0=中速，-1=高速
+
+状态机/按钮:
+  CH5 axes[4]=+1: transform_down
+  CH5 axes[4]=-1 且 CH6 axes[5]=+1: transform_up
+  CH5 axes[4]=-1 且 CH6 axes[5]=0/-1: rl_0
+  上述 rl_0 条件下，CH7 axes[6]=-1: jump
+  上述 rl_0 条件下，Joy button[2/3/4] 预留或 SDK 输入: rl_1 / rl_2 / rl_3
+  CH9 模式值=8: 切换 use_sdk 输入模式
+================================================================
+)");
+  RCLCPP_INFO(
+    this->get_logger(), "Topics: joy=%s, cmd_vel=%s, pose=%s, fsm=%s, uart=%s, use_sdk=%s",
+    ros_topic::joy.c_str(), ros_topic::manager_twist_command.c_str(),
+    ros_topic::manager_pose_command.c_str(), ros_topic::manager_key_command.c_str(),
+    params_.uart_interface.c_str(), params_.use_sdk ? "true" : "false");
+}
+
 void TeleopCmdNode::cmd_vel_cb()
 {
   if (realtime_cmd_vel_publisher_ && realtime_cmd_vel_publisher_->trylock()) {
@@ -160,6 +198,7 @@ void TeleopCmdNode::fsm_goal_cb()
     }
     if (joy_key_msg_.data != msg.data) {
       joy_key_msg_.data = msg.data;
+      RCLCPP_INFO(this->get_logger(), "FSM command: %s", joy_key_msg_.data.c_str());
       realtime_fsm_goal_publisher_->unlockAndPublish();  // only publish when data changed
     } else {
       realtime_fsm_goal_publisher_->unlock();
@@ -230,6 +269,8 @@ void TeleopCmdNode::crsf_dataread_cb(const uint16_t channels[])
         params_.use_sdk = false;
         this->crsf_transfer_data_.use_sdk = 0;
       }
+      RCLCPP_INFO(
+        this->get_logger(), "use_sdk input mode: %s", params_.use_sdk ? "enabled" : "disabled");
     }
   }
   this->last_key = axis_value;

@@ -60,6 +60,10 @@ struct RLParameters
   std::string policy_path;
   std::string output_name;          // output of the policy name
   std::string policy_type{"np3o"};  // ppo or np3o
+  bool use_velocity_estimator{false};
+  std::string estimator_policy_path;
+  std::string estimator_output_name{"estimated_velocity"};
+  int estimator_history_len{3};
   int num_obs;
   int num_actions;
   int history_len{1};
