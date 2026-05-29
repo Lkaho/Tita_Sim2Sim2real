@@ -20,8 +20,47 @@
 
 #include "mujoco_ros2_control/mujoco_system.hpp"
 
+#include <algorithm>
+#include <cmath>
+#include <limits>
+
 namespace mujoco_ros2_control
 {
+namespace
+{
+constexpr double kWheelVelocityLimit = 50.0;
+constexpr double kWheelTorqueLimit = 20.0;
+constexpr double kWheelTorqueSlewRate = 120.0;  // Nm/s
+constexpr double kFallbackControlDt = 0.002;    // 500 Hz ros2_control loop
+
+bool is_wheel_joint(size_t id, size_t leg_dof)
+{
+  return leg_dof > 0 && id % leg_dof == leg_dof - 1;
+}
+
+double apply_wheel_velocity_limit(double torque, double velocity)
+{
+  if (!std::isfinite(torque) || !std::isfinite(velocity)) {
+    return torque;
+  }
+
+  if (std::abs(velocity) < kWheelVelocityLimit) {
+    return torque;
+  }
+
+  return torque * velocity > 0.0 ? 0.0 : torque;
+}
+
+double apply_torque_slew_limit(double target, double previous, double max_delta)
+{
+  if (!std::isfinite(target) || !std::isfinite(previous) || max_delta <= 0.0) {
+    return target;
+  }
+
+  return previous + std::clamp(target - previous, -max_delta, max_delta);
+}
+}  // namespace
+
 MujocoSystem::MujocoSystem() : logger_(rclcpp::get_logger("")) {}
 
 std::vector<hardware_interface::StateInterface> MujocoSystem::export_state_interfaces()
@@ -83,8 +122,13 @@ hardware_interface::return_type MujocoSystem::read(
 }
 
 hardware_interface::return_type MujocoSystem::write(
-  const rclcpp::Time & /* time */, const rclcpp::Duration & /* period */)
+  const rclcpp::Time & /* time */, const rclcpp::Duration &period)
 {
+  const double period_sec = period.seconds();
+  const double control_dt =
+    std::isfinite(period_sec) && period_sec > 0.0 ? period_sec : kFallbackControlDt;
+  const double max_wheel_torque_delta = kWheelTorqueSlewRate * control_dt;
+
   // update mimic joint
   for (auto &joint_state : joint_states_)
   {
@@ -162,8 +206,24 @@ hardware_interface::return_type MujocoSystem::write(
                                                            : std::numeric_limits<double>::max();
     max_eff = std::min(max_eff, joint_state.max_effort_command);
 
-    mj_data_->qfrc_applied[joint_state.mj_vel_adr] =
-      clamp(joint_effort_cmd, min_eff, max_eff);
+    double applied_effort = clamp(joint_effort_cmd, min_eff, max_eff);
+    if (joint_state.is_wheel)
+    {
+      const double torque_limited_effort =
+        std::clamp(applied_effort, -kWheelTorqueLimit, kWheelTorqueLimit);
+      const double velocity_limited_effort =
+        apply_wheel_velocity_limit(torque_limited_effort, joint_state.velocity);
+      applied_effort =
+        joint_state.has_last_applied_effort
+          ? apply_torque_slew_limit(
+              velocity_limited_effort, joint_state.last_applied_effort,
+              max_wheel_torque_delta)
+          : velocity_limited_effort;
+      joint_state.last_applied_effort = applied_effort;
+      joint_state.has_last_applied_effort = true;
+    }
+
+    mj_data_->qfrc_applied[joint_state.mj_vel_adr] = applied_effort;
   }
   return hardware_interface::return_type::OK;
 }
@@ -188,6 +248,14 @@ void MujocoSystem::register_joints(
   const urdf::Model &urdf_model, const hardware_interface::HardwareInfo &hardware_info)
 {
   joint_states_.resize(hardware_info.joints.size());
+  if (hardware_info.joints.size() % 8 == 0)
+  {
+    leg_dof_ = 4;
+  }
+  else if (hardware_info.joints.size() % 6 == 0)
+  {
+    leg_dof_ = 3;
+  }
 
   for (size_t joint_index = 0; joint_index < hardware_info.joints.size(); joint_index++)
   {
@@ -203,6 +271,7 @@ void MujocoSystem::register_joints(
     // save information in joint_states_ variable
     JointState joint_state;
     joint_state.name = joint.name;
+    joint_state.is_wheel = is_wheel_joint(joint_index, leg_dof_);
     joint_state.mj_joint_type = mj_model_->jnt_type[mujoco_joint_id];
     joint_state.mj_pos_adr = mj_model_->jnt_qposadr[mujoco_joint_id];
     joint_state.mj_vel_adr = mj_model_->jnt_dofadr[mujoco_joint_id];

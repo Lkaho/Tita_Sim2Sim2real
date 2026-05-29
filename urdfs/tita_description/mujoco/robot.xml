@@ -1,10 +1,10 @@
 <mujoco model="tita">
   <compiler angle="radian" meshdir="../meshes/" autolimits="true" />
-  <option cone="elliptic" impratio="100" />
+  <option timestep="0.005" cone="elliptic" impratio="100" />
   <default>
     <default class="tita">
-      <geom friction="0.4" margin="0.001" condim="1"/>
-      <joint axis="0 1 0" damping="0.1" armature="0.01" frictionloss="0.2"/>
+      <geom friction="1.0 0.005 0.0001" margin="0.001" condim="3"/>
+      <joint axis="0 1 0" damping="0.0" armature="0.01" frictionloss="0.0"/>
       <default class="visual">
         <geom type="mesh" contype="0" conaffinity="0" group="2" />
       </default>

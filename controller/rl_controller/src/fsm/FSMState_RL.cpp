@@ -16,7 +16,9 @@
 
 #include <algorithm>
 #include <array>
+#include <chrono>
 #include <cmath>
+#include <ctime>
 #include <filesystem>
 #include <iomanip>
 #include <iostream>
@@ -45,6 +47,14 @@ std::string vec_to_string(const DVec<tensor_element_t> & vec)
   return oss.str();
 }
 
+std::string vec_to_string(const Vec3<tensor_element_t> & vec)
+{
+  std::ostringstream oss;
+  oss << std::fixed << std::setprecision(4) << "[" << vec[0] << ", " << vec[1] << ", "
+      << vec[2] << "]";
+  return oss.str();
+}
+
 std::string vec_to_csv_cell(const DVec<tensor_element_t> & vec)
 {
   std::ostringstream oss;
@@ -63,6 +73,39 @@ std::string vec_to_csv_cell(const Vec3<tensor_element_t> & vec)
   std::ostringstream oss;
   oss << std::fixed << std::setprecision(6) << vec[0] << ';' << vec[1] << ';' << vec[2];
   return oss.str();
+}
+
+std::string make_log_run_id()
+{
+  const auto now = std::chrono::system_clock::now();
+  const auto now_time = std::chrono::system_clock::to_time_t(now);
+  const auto milliseconds =
+    std::chrono::duration_cast<std::chrono::milliseconds>(now.time_since_epoch()).count() % 1000;
+
+  std::tm local_time{};
+  localtime_r(&now_time, &local_time);
+
+  std::ostringstream oss;
+  oss << std::put_time(&local_time, "%Y%m%d_%H%M%S") << '_' << std::setw(3)
+      << std::setfill('0') << milliseconds;
+  return oss.str();
+}
+
+std::filesystem::path rl_sim_log_dir()
+{
+  return "/home/raise/ddt_ros2_ws/src/ddt_ros2_control/rl_sim_logs";
+}
+
+bool ensure_rl_sim_log_dir()
+{
+  std::error_code error;
+  std::filesystem::create_directories(rl_sim_log_dir(), error);
+  if (error) {
+    std::cerr << "[FSMState_RL][log] failed to create " << rl_sim_log_dir() << ": "
+              << error.message() << std::endl;
+    return false;
+  }
+  return true;
 }
 
 std::unique_ptr<InferrerBase> make_inferrer()
@@ -87,6 +130,17 @@ size_t tensor_element_count(
     count *= static_cast<size_t>(dim);
   }
   return count;
+}
+
+scalar_t wrap_to_pi(scalar_t angle)
+{
+  constexpr scalar_t pi = static_cast<scalar_t>(3.14159265358979323846);
+  constexpr scalar_t two_pi = static_cast<scalar_t>(2.0) * pi;
+  angle = std::fmod(angle + pi, two_pi);
+  if (angle < static_cast<scalar_t>(0.0)) {
+    angle += two_pi;
+  }
+  return angle - pi;
 }
 }  // namespace
 
@@ -148,6 +202,11 @@ FSMState_RL::FSMState_RL(
   }
 
   has_base_lin_vel_xy_observation_ = requires_base_lin_vel_xy();
+  if (has_base_lin_vel_xy_observation_ && !rl_params_->use_velocity_estimator) {
+    throw std::runtime_error(
+      "[FSMState_RL] base_lin_vel_xy observation requires use_velocity_estimator=true; "
+      "external base velocity topic inputs have been removed");
+  }
   validate_velocity_estimator_config();
   setup_velocity_estimator();
   validate_model_inputs();
@@ -167,9 +226,7 @@ FSMState_RL::FSMState_RL(
     rl_params_->action_scales.resize(rl_params_->num_actions, base_scale);
   }
 
-  if (has_base_lin_vel_xy_observation_ && !rl_params_->use_velocity_estimator) {
-    setup_base_lin_vel_subscription();
-  } else if (has_base_lin_vel_xy_observation_ && rl_params_->use_velocity_estimator) {
+  if (has_base_lin_vel_xy_observation_ && rl_params_->use_velocity_estimator) {
     std::cout << "[FSMState_RL] base_lin_vel_xy is supplied by "
               << rl_params_->estimator_policy_path << "; external velocity topic disabled"
               << std::endl;
@@ -179,17 +236,23 @@ FSMState_RL::FSMState_RL(
 void FSMState_RL::enter()
 {
   obs_.reset();
+  heading_hold_initialized_ = false;
+  desired_heading_ = 0.0;
   update_observations();
   initialize_observation_history();
+  log_run_id_ = make_log_run_id();
   open_strict_start_log();
   open_hardware_frame_log();
+  iter_ = 0;
+  last_wheel_debug_time_ = 0.0;
+  last_leg_debug_time_ = 0.0;
+  last_obs_debug_time_ = 0.0;
   threadRunning = true;
   stop_update_ = false;
   if (thread_first_) {
     forward_thread = std::thread(&FSMState_RL::update_forward, this);
     thread_first_ = false;
   }
-  iter_ = 0;
 }
 
 void FSMState_RL::run()
@@ -210,6 +273,7 @@ void FSMState_RL::run()
     action_snapshot = action_vec_;
   }
   std::vector<tensor_element_t> torques;
+  constexpr bool kPrintLegacyActionDebug = false;
   std::vector<std::string> wheel_debug_entries;
   std::vector<std::string> leg_debug_entries;
   auto action_source_index = [this](int command_index) -> int {
@@ -236,92 +300,58 @@ void FSMState_RL::run()
     }
     return std::numeric_limits<tensor_element_t>::quiet_NaN();
   };
+  auto is_wheel_joint_index = [this](int joint_index) -> bool {
+    return std::find(
+             _data->params->wheel_indices.begin(), _data->params->wheel_indices.end(),
+             joint_index) != _data->params->wheel_indices.end();
+  };
+  auto torque_limit_for = [this](int joint_index) -> scalar_t {
+    return joint_index < static_cast<int>(_data->params->torque_limit.size())
+             ? std::abs(_data->params->torque_limit[joint_index])
+             : std::numeric_limits<scalar_t>::infinity();
+  };
   for (int i = 0; i < rl_params_->num_actions; i++) {
-    tensor_element_t action_scaled = action_snapshot[i] * rl_params_->action_scales[i];
+    const tensor_element_t action_scaled = action_snapshot[i] * rl_params_->action_scales[i];
+    const bool is_wheel_joint = is_wheel_joint_index(i);
+    const tensor_element_t command =
+      action_scaled + (tensor_element_t)rl_params_->default_joint_angles[i];
     // printf("sad%f" , rl_params_->action_scales[i]);
     // tensor_element_t torque = 0.0;
-    if (rl_params_->control_type == "P") {
-      bool is_wheel_joint =
-        std::find(_data->params->wheel_indices.begin(), _data->params->wheel_indices.end(), i) !=
-        _data->params->wheel_indices.end();
-      tensor_element_t command =
-        action_scaled + (tensor_element_t)rl_params_->default_joint_angles[i];
-      _data->low_cmd->kp(i) = is_wheel_joint ? 0.0 : rl_params_->joint_kp[i];
-      _data->low_cmd->kd(i) = is_wheel_joint ? 0.0 : rl_params_->joint_kd[i];
-      _data->low_cmd->qd(i) = is_wheel_joint ? 0.0 : command;
-      _data->low_cmd->qd_dot(i) = 0.0;
-      _data->low_cmd->tau_cmd(i) =
-        is_wheel_joint ? rl_params_->joint_kp[i] * command - rl_params_->joint_kd[i] * vel[i] : 0.0;
-      if (is_wheel_joint) {
-        const int raw_index = action_source_index(i);
-        const scalar_t torque_limit = i < static_cast<int>(_data->params->torque_limit.size())
-                                      ? std::abs(_data->params->torque_limit[i])
-                                      : std::numeric_limits<scalar_t>::infinity();
-        const scalar_t raw_tau = _data->low_cmd->tau_cmd(i);
-        const scalar_t final_tau = std::clamp(raw_tau, -torque_limit, torque_limit);
-        const scalar_t bridge_torque_if_pvt_false =
-          final_tau +
-          _data->low_cmd->kp(i) * (_data->low_cmd->qd(i) - _data->low_state->q(i)) +
-          _data->low_cmd->kd(i) * (_data->low_cmd->qd_dot(i) - _data->low_state->dq(i));
-        std::ostringstream entry;
-        entry << "idx=" << i << " raw_idx=" << raw_index << " raw_action=" << raw_action_at(raw_index)
-              << " sign=" << action_sign(i) << " mapped_action=" << action_snapshot[i]
-              << " action_scale=" << rl_params_->action_scales[i] << " scaled=" << action_scaled
-              << " default_q=" << rl_params_->default_joint_angles[i]
-              << " command=" << command << " q=" << _data->low_state->q(i) << " dq=" << vel[i]
-              << " policy_kp=" << rl_params_->joint_kp[i]
-              << " policy_kd=" << rl_params_->joint_kd[i]
-              << " low_qd=" << _data->low_cmd->qd(i)
-              << " low_qd_dot=" << _data->low_cmd->qd_dot(i)
-              << " low_kp=" << _data->low_cmd->kp(i)
-              << " low_kd=" << _data->low_cmd->kd(i)
-              << " low_tau_pre_clamp=" << _data->low_cmd->tau_cmd(i)
-              << " raw_tau=" << raw_tau << " torque_limit=" << torque_limit
-              << " final_tau=" << final_tau
-              << " bridge_tau_pvt_false_after_clamp=" << bridge_torque_if_pvt_false;
-        wheel_debug_entries.push_back(entry.str());
+    if (rl_params_->control_type != "P" && rl_params_->control_type != "P_V") {
+      throw std::runtime_error("[FSMState_RL] Unknown control type");
+    }
+
+    if (is_wheel_joint) {
+      const int raw_index = action_source_index(i);
+      const scalar_t qdot_des = static_cast<scalar_t>(action_scaled);
+      scalar_t raw_tau = 0.0;
+      scalar_t low_qd_dot = 0.0;
+      if (rl_params_->wheel_torque_mode == "velocity_ff") {
+        const scalar_t k_v = rl_params_->joint_kd[i];
+        const scalar_t k_ff = rl_params_->joint_kp[i];
+        raw_tau = k_v * (qdot_des - static_cast<scalar_t>(vel[i])) + k_ff * qdot_des;
+        low_qd_dot = qdot_des;
+      } else if (rl_params_->wheel_torque_mode == "legacy") {
+        raw_tau =
+          rl_params_->joint_kp[i] * static_cast<scalar_t>(command) -
+          rl_params_->joint_kd[i] * static_cast<scalar_t>(vel[i]);
       } else {
-        const int raw_index = action_source_index(i);
-        const scalar_t pos_err = _data->low_cmd->qd(i) - _data->low_state->q(i);
-        const scalar_t vel_err = _data->low_cmd->qd_dot(i) - _data->low_state->dq(i);
-        const scalar_t bridge_torque_if_pvt_false =
-          _data->low_cmd->tau_cmd(i) +
-          _data->low_cmd->kp(i) * pos_err +
-          _data->low_cmd->kd(i) * vel_err;
-        std::ostringstream entry;
-        entry << "idx=" << i << " raw_idx=" << raw_index << " raw_action=" << raw_action_at(raw_index)
-              << " sign=" << action_sign(i) << " mapped_action=" << action_snapshot[i]
-              << " action_scale=" << rl_params_->action_scales[i] << " scaled=" << action_scaled
-              << " default_q=" << rl_params_->default_joint_angles[i]
-              << " command=" << command << " q=" << _data->low_state->q(i) << " dq=" << vel[i]
-              << " pos_err=" << pos_err << " vel_err=" << vel_err
-              << " policy_kp=" << rl_params_->joint_kp[i]
-              << " policy_kd=" << rl_params_->joint_kd[i]
-              << " low_qd=" << _data->low_cmd->qd(i)
-              << " low_qd_dot=" << _data->low_cmd->qd_dot(i)
-              << " low_kp=" << _data->low_cmd->kp(i)
-              << " low_kd=" << _data->low_cmd->kd(i)
-              << " low_tau=" << _data->low_cmd->tau_cmd(i)
-              << " bridge_tau_pvt_false=" << bridge_torque_if_pvt_false;
-        leg_debug_entries.push_back(entry.str());
+        throw std::runtime_error("[FSMState_RL] Unknown wheel torque mode");
       }
-    } else if (rl_params_->control_type == "P_V") {
-      bool is_wheel_joint =
-        std::find(_data->params->wheel_indices.begin(), _data->params->wheel_indices.end(), i) !=
-        _data->params->wheel_indices.end();
-      tensor_element_t command =
-        action_scaled + (tensor_element_t)rl_params_->default_joint_angles[i];
-      _data->low_cmd->kp(i) = is_wheel_joint ? 0.0 : rl_params_->joint_kp[i];
-      _data->low_cmd->kd(i) = rl_params_->joint_kd[i];
-      _data->low_cmd->qd(i) = is_wheel_joint ? 0.0 : command;
-      _data->low_cmd->qd_dot(i) = is_wheel_joint ? action_scaled : 0.0;
-      _data->low_cmd->tau_cmd(i) = 0.0;
-      if (is_wheel_joint) {
-        const int raw_index = action_source_index(i);
-        const scalar_t bridge_torque_if_pvt_false =
-          _data->low_cmd->tau_cmd(i) +
-          _data->low_cmd->kp(i) * (_data->low_cmd->qd(i) - _data->low_state->q(i)) +
-          _data->low_cmd->kd(i) * (_data->low_cmd->qd_dot(i) - _data->low_state->dq(i));
+      const scalar_t torque_limit = torque_limit_for(i);
+      const scalar_t final_tau = std::clamp(raw_tau, -torque_limit, torque_limit);
+
+      _data->low_cmd->kp(i) = 0.0;
+      _data->low_cmd->kd(i) = 0.0;
+      _data->low_cmd->qd(i) = 0.0;
+      _data->low_cmd->qd_dot(i) = low_qd_dot;
+      _data->low_cmd->tau_cmd(i) = final_tau;
+
+      const scalar_t bridge_torque_if_pvt_false =
+        _data->low_cmd->tau_cmd(i) +
+        _data->low_cmd->kp(i) * (_data->low_cmd->qd(i) - _data->low_state->q(i)) +
+        _data->low_cmd->kd(i) * (_data->low_cmd->qd_dot(i) - _data->low_state->dq(i));
+      if (kPrintLegacyActionDebug) {
         std::ostringstream entry;
         entry << "idx=" << i << " raw_idx=" << raw_index
               << " raw_action=" << raw_action_at(raw_index) << " sign=" << action_sign(i)
@@ -329,48 +359,59 @@ void FSMState_RL::run()
               << " action_scale=" << rl_params_->action_scales[i] << " scaled=" << action_scaled
               << " default_q=" << rl_params_->default_joint_angles[i]
               << " command=" << command << " q=" << _data->low_state->q(i) << " dq=" << vel[i]
+              << " wheel_torque_mode=" << rl_params_->wheel_torque_mode
+              << " qdot_des=" << qdot_des
               << " policy_kp=" << rl_params_->joint_kp[i]
               << " policy_kd=" << rl_params_->joint_kd[i]
               << " low_qd=" << _data->low_cmd->qd(i)
               << " low_qd_dot=" << _data->low_cmd->qd_dot(i)
               << " low_kp=" << _data->low_cmd->kp(i)
               << " low_kd=" << _data->low_cmd->kd(i)
-              << " low_tau_pre_clamp=" << _data->low_cmd->tau_cmd(i)
+              << " low_tau_pre_clamp=" << raw_tau << " torque_limit=" << torque_limit
+              << " final_tau=" << final_tau
               << " bridge_tau_pvt_false=" << bridge_torque_if_pvt_false;
         wheel_debug_entries.push_back(entry.str());
-      } else {
-        const int raw_index = action_source_index(i);
-        const scalar_t pos_err = _data->low_cmd->qd(i) - _data->low_state->q(i);
-        const scalar_t vel_err = _data->low_cmd->qd_dot(i) - _data->low_state->dq(i);
-        const scalar_t bridge_torque_if_pvt_false =
-          _data->low_cmd->tau_cmd(i) +
-          _data->low_cmd->kp(i) * pos_err +
-          _data->low_cmd->kd(i) * vel_err;
-        std::ostringstream entry;
-        entry << "idx=" << i << " raw_idx=" << raw_index << " raw_action=" << raw_action_at(raw_index)
-              << " sign=" << action_sign(i) << " mapped_action=" << action_snapshot[i]
-              << " action_scale=" << rl_params_->action_scales[i] << " scaled=" << action_scaled
-              << " default_q=" << rl_params_->default_joint_angles[i]
-              << " command=" << command << " q=" << _data->low_state->q(i) << " dq=" << vel[i]
-              << " pos_err=" << pos_err << " vel_err=" << vel_err
-              << " policy_kp=" << rl_params_->joint_kp[i]
-              << " policy_kd=" << rl_params_->joint_kd[i]
-              << " low_qd=" << _data->low_cmd->qd(i)
-              << " low_qd_dot=" << _data->low_cmd->qd_dot(i)
-              << " low_kp=" << _data->low_cmd->kp(i)
-              << " low_kd=" << _data->low_cmd->kd(i)
-              << " low_tau=" << _data->low_cmd->tau_cmd(i)
-              << " bridge_tau_pvt_false=" << bridge_torque_if_pvt_false;
-        leg_debug_entries.push_back(entry.str());
       }
-    } else {
-      throw std::runtime_error("[FSMState_RL] Unknown control type");
+      continue;
+    }
+
+    _data->low_cmd->kp(i) = rl_params_->joint_kp[i];
+    _data->low_cmd->kd(i) = rl_params_->joint_kd[i];
+    _data->low_cmd->qd(i) = command;
+    _data->low_cmd->qd_dot(i) = 0.0;
+    _data->low_cmd->tau_cmd(i) = 0.0;
+
+    const int raw_index = action_source_index(i);
+    const scalar_t pos_err = _data->low_cmd->qd(i) - _data->low_state->q(i);
+    const scalar_t vel_err = _data->low_cmd->qd_dot(i) - _data->low_state->dq(i);
+    const scalar_t bridge_torque_if_pvt_false =
+      _data->low_cmd->tau_cmd(i) +
+      _data->low_cmd->kp(i) * pos_err +
+      _data->low_cmd->kd(i) * vel_err;
+    if (kPrintLegacyActionDebug) {
+      std::ostringstream entry;
+      entry << "idx=" << i << " raw_idx=" << raw_index
+            << " raw_action=" << raw_action_at(raw_index)
+            << " sign=" << action_sign(i) << " mapped_action=" << action_snapshot[i]
+            << " action_scale=" << rl_params_->action_scales[i] << " scaled=" << action_scaled
+            << " default_q=" << rl_params_->default_joint_angles[i]
+            << " command=" << command << " q=" << _data->low_state->q(i) << " dq=" << vel[i]
+            << " pos_err=" << pos_err << " vel_err=" << vel_err
+            << " policy_kp=" << rl_params_->joint_kp[i]
+            << " policy_kd=" << rl_params_->joint_kd[i]
+            << " low_qd=" << _data->low_cmd->qd(i)
+            << " low_qd_dot=" << _data->low_cmd->qd_dot(i)
+            << " low_kp=" << _data->low_cmd->kp(i)
+            << " low_kd=" << _data->low_cmd->kd(i)
+            << " low_tau=" << _data->low_cmd->tau_cmd(i)
+            << " bridge_tau_pvt_false=" << bridge_torque_if_pvt_false;
+      leg_debug_entries.push_back(entry.str());
     }
     // torque *= rl_params_->output_torque_scale;
     // torques.push_back(torque);
   }
   const double now = getTimeSecond();
-  if (!wheel_debug_entries.empty() && now - last_wheel_debug_time_ > 0.5) {
+  if (kPrintLegacyActionDebug && !wheel_debug_entries.empty() && now - last_wheel_debug_time_ > 0.5) {
     last_wheel_debug_time_ = now;
     std::cout << "[FSMState_RL][wheel_debug]";
     for (const auto & entry : wheel_debug_entries) {
@@ -378,7 +419,7 @@ void FSMState_RL::run()
     }
     std::cout << std::endl;
   }
-  if (!leg_debug_entries.empty() && now - last_leg_debug_time_ > 0.5) {
+  if (kPrintLegacyActionDebug && !leg_debug_entries.empty() && now - last_leg_debug_time_ > 0.5) {
     last_leg_debug_time_ = now;
     std::cout << "[FSMState_RL][leg_debug]";
     for (const auto & entry : leg_debug_entries) {
@@ -405,7 +446,19 @@ void FSMState_RL::open_strict_start_log()
     strict_start_log_.close();
   }
 
-  strict_start_log_path_ = "/tmp/fsmstate_rl_strict_policy_start_" + _stateName + ".csv";
+  if (!rl_params_->csv_logging_enabled) {
+    strict_start_log_path_.clear();
+    return;
+  }
+
+  if (!ensure_rl_sim_log_dir()) {
+    return;
+  }
+
+  strict_start_log_path_ =
+    (rl_sim_log_dir() /
+     ("fsmstate_rl_strict_policy_start_" + _stateName + "_" + log_run_id_ + ".csv"))
+      .string();
   strict_start_log_.open(strict_start_log_path_, std::ios::out | std::ios::trunc);
   if (!strict_start_log_.is_open()) {
     std::cerr << "[FSMState_RL][strict_log] failed to open " << strict_start_log_path_
@@ -414,14 +467,15 @@ void FSMState_RL::open_strict_start_log()
   }
 
   strict_start_log_
-    << "policy_step,time_sec,state,joint_idx,raw_idx,raw_action,mapped_action,action_scale,"
-       "scaled,default_q,command,q,dq,control_type,policy_kp,policy_kd,low_qd,low_qd_dot,"
-       "low_kp,low_kd,low_tau_pre_clamp,torque_limit,fsm_final_tau,"
+    << "policy_step,time_sec,state,joint_idx,joint_type,raw_idx,raw_action,mapped_action,"
+       "action_scale,scaled,default_q,target_q,target_dq,q,dq,tau,tau_pre_clamp,"
+       "torque_limit,control_type,policy_kp,policy_kd,low_qd,low_qd_dot,"
+       "low_kp,low_kd,low_tau_pre_clamp,fsm_final_tau,"
        "bridge_tau_pvt_false,raw_actions,mapped_actions,obs_ang_vel,obs_gravity,obs_commands,"
        "obs_lin_vel,obs_vec\n";
   strict_start_log_.flush();
-  std::cout << "[FSMState_RL][strict_log] writing first " << kStrictPolicyLogLimit
-            << " policy outputs to " << strict_start_log_path_ << std::endl;
+  std::cout << "[FSMState_RL][strict_log] writing policy outputs until RL exit to "
+            << strict_start_log_path_ << std::endl;
 }
 
 void FSMState_RL::open_hardware_frame_log()
@@ -432,12 +486,24 @@ void FSMState_RL::open_hardware_frame_log()
     hardware_frame_log_.close();
   }
 
+  if (!rl_params_->csv_logging_enabled) {
+    hardware_frame_log_path_.clear();
+    return;
+  }
+
   if (!is_hardware_runtime()) {
     hardware_frame_log_path_.clear();
     return;
   }
 
-  hardware_frame_log_path_ = "/tmp/fsmstate_rl_hw_obs_action_" + _stateName + ".csv";
+  if (!ensure_rl_sim_log_dir()) {
+    return;
+  }
+
+  hardware_frame_log_path_ =
+    (rl_sim_log_dir() /
+     ("fsmstate_rl_hw_obs_action_" + _stateName + "_" + log_run_id_ + ".csv"))
+      .string();
   hardware_frame_log_.open(hardware_frame_log_path_, std::ios::out | std::ios::trunc);
   if (!hardware_frame_log_.is_open()) {
     std::cerr << "[FSMState_RL][hw_frame_log] failed to open " << hardware_frame_log_path_
@@ -483,7 +549,7 @@ void FSMState_RL::log_strict_policy_output(
   const DVec<tensor_element_t> & mapped_actions)
 {
   std::lock_guard<std::mutex> lock(strict_log_mutex_);
-  if (!strict_start_log_.is_open() || strict_policy_step_ >= kStrictPolicyLogLimit) {
+  if (!strict_start_log_.is_open()) {
     return;
   }
 
@@ -502,15 +568,21 @@ void FSMState_RL::log_strict_policy_output(
     }
     return -1;
   };
+  const auto is_wheel_joint = [this](int joint_index) -> bool {
+    return std::find(
+             _data->params->wheel_indices.begin(), _data->params->wheel_indices.end(),
+             joint_index) != _data->params->wheel_indices.end();
+  };
 
   DVec<tensor_element_t> q = d2f(_data->low_state->q);
   DVec<tensor_element_t> dq = d2f(_data->low_state->dq);
   const double now_sec = getTimeSecond();
 
   strict_start_log_ << std::fixed << std::setprecision(9);
-  for (const auto wheel_index_long : _data->params->wheel_indices) {
-    const int i = static_cast<int>(wheel_index_long);
+  for (int i = 0; i < rl_params_->num_actions; ++i) {
     if (i < 0 || i >= mapped_actions.size() ||
+        i >= static_cast<int>(q.size()) ||
+        i >= static_cast<int>(dq.size()) ||
         i >= static_cast<int>(rl_params_->action_scales.size()) ||
         i >= static_cast<int>(rl_params_->default_joint_angles.size()) ||
         i >= static_cast<int>(rl_params_->joint_kp.size()) ||
@@ -519,9 +591,13 @@ void FSMState_RL::log_strict_policy_output(
     }
 
     const int raw_index = action_source_index(i);
+    const bool wheel_joint = is_wheel_joint(i);
+    const char * joint_type = wheel_joint ? "wheel" : "leg";
     const tensor_element_t action_scaled = mapped_actions[i] * rl_params_->action_scales[i];
-    const tensor_element_t command =
-      action_scaled + static_cast<tensor_element_t>(rl_params_->default_joint_angles[i]);
+    const tensor_element_t target_q =
+      wheel_joint ? static_cast<tensor_element_t>(0.0)
+                  : action_scaled +
+                      static_cast<tensor_element_t>(rl_params_->default_joint_angles[i]);
     const scalar_t torque_limit = i < static_cast<int>(_data->params->torque_limit.size())
                                     ? std::abs(_data->params->torque_limit[i])
                                     : std::numeric_limits<scalar_t>::infinity();
@@ -533,30 +609,53 @@ void FSMState_RL::log_strict_policy_output(
     scalar_t low_tau_pre_clamp = 0.0;
     scalar_t fsm_final_tau = 0.0;
     scalar_t bridge_tau_pvt_false = 0.0;
+    scalar_t tau = 0.0;
 
-    if (rl_params_->control_type == "P") {
-      low_tau_pre_clamp = rl_params_->joint_kp[i] * command - rl_params_->joint_kd[i] * dq[i];
+    if (wheel_joint) {
+      low_qd = 0.0;
+      low_kp = 0.0;
+      low_kd = 0.0;
+      if (rl_params_->wheel_torque_mode == "velocity_ff") {
+        low_qd_dot = static_cast<scalar_t>(action_scaled);
+        low_tau_pre_clamp =
+          rl_params_->joint_kd[i] * (static_cast<scalar_t>(action_scaled) - dq[i]) +
+          rl_params_->joint_kp[i] * static_cast<scalar_t>(action_scaled);
+      } else if (rl_params_->wheel_torque_mode == "legacy") {
+        low_qd_dot = 0.0;
+        low_tau_pre_clamp =
+          rl_params_->joint_kp[i] * static_cast<scalar_t>(
+            action_scaled + static_cast<tensor_element_t>(rl_params_->default_joint_angles[i])) -
+          rl_params_->joint_kd[i] * dq[i];
+      } else {
+        continue;
+      }
       fsm_final_tau = std::clamp(low_tau_pre_clamp, -torque_limit, torque_limit);
-      bridge_tau_pvt_false = fsm_final_tau;
-    } else if (rl_params_->control_type == "P_V") {
-      low_qd_dot = action_scaled;
+    } else if (rl_params_->control_type == "P" || rl_params_->control_type == "P_V") {
+      low_qd = target_q;
+      low_qd_dot = 0.0;
+      low_kp = rl_params_->joint_kp[i];
       low_kd = rl_params_->joint_kd[i];
       low_tau_pre_clamp = 0.0;
       fsm_final_tau = std::clamp(low_tau_pre_clamp, -torque_limit, torque_limit);
-      bridge_tau_pvt_false = low_kd * (low_qd_dot - dq[i]);
     } else {
       continue;
     }
 
+    bridge_tau_pvt_false =
+      fsm_final_tau + low_kp * (low_qd - q[i]) + low_kd * (low_qd_dot - dq[i]);
+    tau = std::clamp(bridge_tau_pvt_false, -torque_limit, torque_limit);
+
     strict_start_log_
       << strict_policy_step_ << ',' << now_sec << ',' << _stateName << ',' << i << ','
-      << raw_index << ',' << raw_action_at(raw_index) << ',' << mapped_actions[i] << ','
+      << joint_type << ',' << raw_index << ',' << raw_action_at(raw_index) << ','
+      << mapped_actions[i] << ','
       << rl_params_->action_scales[i] << ',' << action_scaled << ','
-      << rl_params_->default_joint_angles[i] << ',' << command << ',' << q[i] << ',' << dq[i]
-      << ',' << rl_params_->control_type << ',' << rl_params_->joint_kp[i] << ','
+      << rl_params_->default_joint_angles[i] << ',' << target_q << ',' << low_qd_dot << ','
+      << q[i] << ',' << dq[i] << ',' << tau << ',' << bridge_tau_pvt_false << ','
+      << torque_limit << ',' << rl_params_->control_type << ',' << rl_params_->joint_kp[i] << ','
       << rl_params_->joint_kd[i] << ',' << low_qd << ',' << low_qd_dot << ',' << low_kp << ','
-      << low_kd << ',' << low_tau_pre_clamp << ',' << torque_limit << ',' << fsm_final_tau
-      << ',' << bridge_tau_pvt_false << ",\"" << vec_to_csv_cell(raw_actions) << "\",\""
+      << low_kd << ',' << low_tau_pre_clamp << ',' << fsm_final_tau << ','
+      << bridge_tau_pvt_false << ",\"" << vec_to_csv_cell(raw_actions) << "\",\""
       << vec_to_csv_cell(mapped_actions) << "\",\"" << vec_to_csv_cell(obs_.ang_vel)
       << "\",\"" << vec_to_csv_cell(obs_.gravity) << "\",\"" << vec_to_csv_cell(obs_.commands)
       << "\",\"" << vec_to_csv_cell(obs_.lin_vel) << "\",\"" << vec_to_csv_cell(obs_vec_)
@@ -565,10 +664,6 @@ void FSMState_RL::log_strict_policy_output(
 
   strict_start_log_.flush();
   strict_policy_step_++;
-  if (strict_policy_step_ == kStrictPolicyLogLimit) {
-    std::cout << "[FSMState_RL][strict_log] reached " << kStrictPolicyLogLimit
-              << " policy outputs in " << strict_start_log_path_ << std::endl;
-  }
 }
 
 bool FSMState_RL::is_hardware_runtime() const
@@ -606,6 +701,7 @@ void FSMState_RL::print_latest_frame_debug(
   const DVec<tensor_element_t> & raw_actions,
   const DVec<tensor_element_t> & mapped_actions)
 {
+  const int timestep = iter_++;
   const double now_sec = getTimeSecond();
   if (now_sec - last_obs_debug_time_ <= 0.5) {
     return;
@@ -616,13 +712,6 @@ void FSMState_RL::print_latest_frame_debug(
   const DVec<tensor_element_t> raw_dq = d2f(_data->low_state->dq);
   const DVec<tensor_element_t> default_q = d2f(vectorToEigen(rl_params_->default_joint_angles));
   const DVec<tensor_element_t> raw_pos_rel = raw_q - default_q;
-
-  DVec<tensor_element_t> policy_pos_rel = obs_.dof_pos - default_q;
-  DVec<tensor_element_t> policy_dq = obs_.dof_vel;
-  policy_pos_rel = reindex_observation(policy_pos_rel);
-  policy_pos_rel = re_sign_observation(policy_pos_rel);
-  policy_dq = reindex_observation(policy_dq);
-  policy_dq = re_sign_observation(policy_dq);
 
   size_t leg_count = !_data->params->hip_indices.empty() ? _data->params->hip_indices.size() : 0;
   if (leg_count == 0) {
@@ -636,11 +725,79 @@ void FSMState_RL::print_latest_frame_debug(
   }
   const size_t leg_dof = std::max<size_t>(1, static_cast<size_t>(raw_q.size()) / leg_count);
 
+  std::vector<std::string> joint_names;
+  if (_data && _data->node) {
+    _data->node->get_parameter("joints", joint_names);
+  }
+  auto joint_name_for = [&joint_names](int index) -> std::string {
+    if (index >= 0 && index < static_cast<int>(joint_names.size())) {
+      return joint_names[static_cast<size_t>(index)];
+    }
+    return "joint_" + std::to_string(index);
+  };
+  auto is_wheel_joint = [this](int joint_index) -> bool {
+    return std::find(
+             _data->params->wheel_indices.begin(), _data->params->wheel_indices.end(),
+             joint_index) != _data->params->wheel_indices.end();
+  };
+  auto action_source_index = [this](int command_index) -> int {
+    if (rl_params_->reindex.empty()) {
+      return command_index;
+    }
+    if (command_index >= 0 && command_index < static_cast<int>(rl_params_->reindex.size())) {
+      return static_cast<int>(rl_params_->reindex[command_index]);
+    }
+    return -1;
+  };
+  auto raw_action_at = [&raw_actions](int raw_index) -> tensor_element_t {
+    if (raw_index >= 0 && raw_index < raw_actions.size()) {
+      return raw_actions[raw_index];
+    }
+    return std::numeric_limits<tensor_element_t>::quiet_NaN();
+  };
+
+  DVec<tensor_element_t> command_values(rl_params_->commands_name.size());
+  for (Eigen::Index i = 0; i < command_values.size(); ++i) {
+    const scalar_t scale =
+      i < static_cast<Eigen::Index>(rl_params_->commands_scale.size()) ? rl_params_->commands_scale[i]
+                                                                       : 1.0;
+    command_values[i] = std::abs(scale) > static_cast<scalar_t>(1.0e-9)
+                          ? obs_.commands[i] / static_cast<tensor_element_t>(scale)
+                          : obs_.commands[i];
+  }
+
   std::ostringstream frame_stream;
-  frame_stream << "[FSMState_RL][frame_debug]\n";
   frame_stream << std::fixed << std::setprecision(4);
-  frame_stream << "  runtime=" << runtime_label() << " state=" << _stateName
-               << " time_sec=" << now_sec << '\n';
+  frame_stream << "\n[Step " << timestep << ", Time "
+               << static_cast<double>(timestep) * rl_params_->time_interval << "s]\n";
+  frame_stream << "  Current policy observation: total_dim=" << obs_vec_.size() << '\n';
+  frame_stream << "  Policy terms (current frame only):\n";
+  for (size_t i = 0; i < obs_terms_.size(); ++i) {
+    frame_stream << "    " << rl_params_->observations_name[i] << ": "
+                 << vec_to_string(obs_terms_[i]) << '\n';
+  }
+
+  if (rl_params_->use_velocity_estimator) {
+    DVec<tensor_element_t> estimated_velocity(2);
+    estimated_velocity << estimated_base_lin_vel_body_[0], estimated_base_lin_vel_body_[1];
+    frame_stream << "  Velocity estimator:\n";
+    frame_stream << "    estimated base_lin_vel_xy: " << vec_to_string(estimated_velocity) << '\n';
+    if (command_values.size() >= 2) {
+      DVec<tensor_element_t> command_xy(2);
+      command_xy << command_values[0], command_values[1];
+      DVec<tensor_element_t> estimated_track_error = estimated_velocity - command_xy;
+      frame_stream << "  Tracking diagnostics:\n";
+      frame_stream << "    ros_command_xy:      " << vec_to_string(command_xy) << '\n';
+      frame_stream << "    estimated_vel_xy:    " << vec_to_string(estimated_velocity) << '\n';
+      frame_stream << "    estimated_track_err: "
+                   << vec_to_string(estimated_track_error) << '\n';
+    }
+  }
+
+  frame_stream << "  Robot state:\n";
+  frame_stream << "    runtime: " << runtime_label() << " state=" << _stateName << '\n';
+  frame_stream << "    projected_gravity: " << vec_to_string(obs_.gravity) << '\n';
+  frame_stream << "    angular_velocity:  " << vec_to_string(obs_.ang_vel) << '\n';
   for (size_t leg_index = 0; leg_index < leg_count; ++leg_index) {
     const Eigen::Index offset = static_cast<Eigen::Index>(leg_index * leg_dof);
     const Eigen::Index count = std::min<Eigen::Index>(
@@ -652,17 +809,54 @@ void FSMState_RL::print_latest_frame_debug(
     const DVec<tensor_element_t> leg_q = raw_q.segment(offset, count);
     const DVec<tensor_element_t> leg_default = default_q.segment(offset, count);
     const DVec<tensor_element_t> leg_delta = raw_pos_rel.segment(offset, count);
-    frame_stream << "  " << leg_label(leg_index, leg_count) << " q=" << vec_to_string(leg_q)
+    frame_stream << "    " << leg_label(leg_index, leg_count) << " q=" << vec_to_string(leg_q)
                  << " default=" << vec_to_string(leg_default)
                  << " delta=" << vec_to_string(leg_delta) << '\n';
   }
-  for (size_t i = 0; i < obs_terms_.size(); ++i) {
-    frame_stream << "  obs." << rl_params_->observations_name[i] << "="
-                 << vec_to_string(obs_terms_[i]) << '\n';
+
+  frame_stream << "  Commands:\n";
+  for (size_t i = 0; i < rl_params_->commands_name.size(); ++i) {
+    frame_stream << "    " << rl_params_->commands_name[i] << ": " << command_values[i] << '\n';
   }
-  frame_stream << "  obs.obs_vec=" << vec_to_string(obs_vec_) << '\n';
-  frame_stream << "  policy.raw_actions=" << vec_to_string(raw_actions) << '\n';
-  frame_stream << "  policy.mapped_actions=" << vec_to_string(mapped_actions);
+
+  frame_stream << "  Actions (synced):\n";
+  frame_stream << "    " << std::left << std::setw(5) << "Idx" << ' ' << std::setw(35)
+               << "Term->Joint" << ' ' << std::right << std::setw(10) << "Raw" << ' '
+               << std::setw(8) << "Scale" << ' ' << std::setw(12) << "Applied" << "  "
+               << std::left << std::setw(20) << "Offset/Note" << '\n';
+  frame_stream << "    " << std::string(92, '-') << '\n';
+  for (int i = 0; i < rl_params_->num_actions; ++i) {
+    const int raw_index = action_source_index(i);
+    const tensor_element_t mapped_action =
+      i < mapped_actions.size() ? mapped_actions[i] : std::numeric_limits<tensor_element_t>::quiet_NaN();
+    const scalar_t scale = i < static_cast<int>(rl_params_->action_scales.size())
+                             ? rl_params_->action_scales[i]
+                             : static_cast<scalar_t>(1.0);
+    const tensor_element_t scaled_action = mapped_action * static_cast<tensor_element_t>(scale);
+    const bool wheel_joint = is_wheel_joint(i);
+    const tensor_element_t applied_value =
+      wheel_joint ? scaled_action
+                  : scaled_action + static_cast<tensor_element_t>(rl_params_->default_joint_angles[i]);
+
+    std::ostringstream note;
+    if (!rl_params_->reindex.empty()) {
+      note << "raw_idx=" << raw_index << ", ";
+    }
+    if (wheel_joint) {
+      note << rl_params_->wheel_torque_mode;
+    } else {
+      note << "offset=" << rl_params_->default_joint_angles[i];
+    }
+
+    std::ostringstream term_joint;
+    term_joint << "action->" << joint_name_for(i);
+
+    frame_stream << "    [" << std::left << std::setw(3) << i << "] " << std::setw(35)
+                 << term_joint.str() << std::right << std::setw(10) << raw_action_at(raw_index)
+                 << " x" << std::left << std::setw(7) << scale << std::right << '='
+                 << std::setw(11) << applied_value << "  " << std::left << std::setw(20)
+                 << note.str() << '\n';
+  }
   std::cout << frame_stream.str() << std::endl;
 }
 
@@ -1000,91 +1194,6 @@ bool FSMState_RL::requires_base_lin_vel_xy() const
            "base_lin_vel_xy") != rl_params_->observations_name.end();
 }
 
-bool FSMState_RL::should_accept_base_lin_vel_sample(
-  double now_sec, double & last_time_sec, int rate_hz)
-{
-  if (rate_hz <= 0) {
-    last_time_sec = now_sec;
-    return true;
-  }
-
-  const double min_interval = 1.0 / static_cast<double>(rate_hz);
-  if (last_time_sec >= 0.0 && now_sec - last_time_sec < min_interval) {
-    return false;
-  }
-
-  last_time_sec = now_sec;
-  return true;
-}
-
-void FSMState_RL::setup_base_lin_vel_subscription()
-{
-  if (!_data->node) {
-    throw std::runtime_error(
-      "[FSMState_RL] base_lin_vel_xy requires a valid ROS node for subscriptions");
-  }
-
-  bool use_sim_time = false;
-  _data->node->get_parameter("use_sim_time", use_sim_time);
-  use_sim_base_lin_vel_source_ = use_sim_time;
-
-  auto qos = rclcpp::SensorDataQoS();
-  if (use_sim_base_lin_vel_source_) {
-    if (rl_params_->base_lin_vel_xy_sim_topic.empty()) {
-      throw std::runtime_error(
-        "[FSMState_RL] base_lin_vel_xy sim_topic is empty while use_sim_time=true");
-    }
-    base_lin_vel_sim_subscription_ = _data->node->create_subscription<geometry_msgs::msg::Vector3>(
-      rl_params_->base_lin_vel_xy_sim_topic, qos,
-      std::bind(&FSMState_RL::sim_base_lin_vel_cb, this, std::placeholders::_1));
-    RCLCPP_INFO(
-      _data->node->get_logger(),
-      "[FSMState_RL] base_lin_vel_xy uses sim topic %s at %d Hz",
-      rl_params_->base_lin_vel_xy_sim_topic.c_str(), rl_params_->base_lin_vel_xy_sim_rate_hz);
-    return;
-  }
-
-  if (rl_params_->base_lin_vel_xy_hw_topic.empty()) {
-    throw std::runtime_error(
-      "[FSMState_RL] base_lin_vel_xy hw_topic is empty while use_sim_time=false");
-  }
-  base_lin_vel_hw_subscription_ = _data->node->create_subscription<std_msgs::msg::Float64>(
-    rl_params_->base_lin_vel_xy_hw_topic, qos,
-    std::bind(&FSMState_RL::hw_base_lin_vel_cb, this, std::placeholders::_1));
-  RCLCPP_INFO(
-    _data->node->get_logger(),
-    "[FSMState_RL] base_lin_vel_xy uses hardware Float64 x-velocity topic %s at %d Hz",
-    rl_params_->base_lin_vel_xy_hw_topic.c_str(), rl_params_->base_lin_vel_xy_hw_rate_hz);
-}
-
-void FSMState_RL::sim_base_lin_vel_cb(const geometry_msgs::msg::Vector3::SharedPtr msg)
-{
-  const double now_sec = _data->node ? _data->node->now().seconds() : getTimeSecond();
-  std::lock_guard<std::mutex> lock(base_lin_vel_mutex_);
-  if (
-    !should_accept_base_lin_vel_sample(
-      now_sec, last_base_lin_vel_sim_update_time_, rl_params_->base_lin_vel_xy_sim_rate_hz)) {
-    return;
-  }
-
-  latest_base_lin_vel_world_ << static_cast<tensor_element_t>(msg->x),
-    static_cast<tensor_element_t>(msg->y), static_cast<tensor_element_t>(msg->z);
-}
-
-void FSMState_RL::hw_base_lin_vel_cb(const std_msgs::msg::Float64::SharedPtr msg)
-{
-  const double now_sec = _data->node ? _data->node->now().seconds() : getTimeSecond();
-  std::lock_guard<std::mutex> lock(base_lin_vel_mutex_);
-  if (
-    !should_accept_base_lin_vel_sample(
-      now_sec, last_base_lin_vel_hw_update_time_, rl_params_->base_lin_vel_xy_hw_rate_hz)) {
-    return;
-  }
-
-  latest_base_lin_vel_body_ << static_cast<tensor_element_t>(msg->data),
-    static_cast<tensor_element_t>(0.0), static_cast<tensor_element_t>(0.0);
-}
-
 DVec<tensor_element_t> FSMState_RL::build_observation_term(
   const std::string & observation_name, const DVec<tensor_element_t> & pos,
   const DVec<tensor_element_t> & vel)
@@ -1197,14 +1306,13 @@ void FSMState_RL::update_observations()
   // compute gravity
   auto rBody = d2f(ori::quaternionToRotationMatrix(_data->low_state->quat));
   obs_.gravity = rBody * Vec3<tensor_element_t>(0.0, 0.0, -1.0);
-  if (has_base_lin_vel_xy_observation_) {
-    if (rl_params_->use_velocity_estimator) {
-      obs_.lin_vel = estimated_base_lin_vel_body_;
-    } else {
-      std::lock_guard<std::mutex> lock(base_lin_vel_mutex_);
-      obs_.lin_vel = use_sim_base_lin_vel_source_ ? rBody * latest_base_lin_vel_world_
-                                                  : latest_base_lin_vel_body_;
-    }
+  const scalar_t current_heading = ori::quatToRPY(_data->low_state->quat)[2];
+  if (rl_params_->heading_hold_enabled && !heading_hold_initialized_) {
+    desired_heading_ = current_heading;
+    heading_hold_initialized_ = true;
+  }
+  if (has_base_lin_vel_xy_observation_ && rl_params_->use_velocity_estimator) {
+    obs_.lin_vel = estimated_base_lin_vel_body_;
   }
 
   // command
@@ -1217,8 +1325,21 @@ void FSMState_RL::update_observations()
       command = rl_params_->commands_gain[i] * _data->rc_data->twist_linear[point::Y] +
                 rl_params_->commands_comp[i];
     } else if (rl_params_->commands_name[i] == "ang_vel_z") {
-      command = rl_params_->commands_gain[i] * _data->rc_data->twist_angular[point::Z] +
-                rl_params_->commands_comp[i];
+      const scalar_t user_yaw_rate =
+        rl_params_->commands_gain[i] * _data->rc_data->twist_angular[point::Z];
+      if (rl_params_->heading_hold_enabled) {
+        const bool active_yaw_input =
+          std::abs(user_yaw_rate) > rl_params_->heading_hold_yaw_input_threshold;
+        if (active_yaw_input) {
+          desired_heading_ = current_heading;
+          command = user_yaw_rate + rl_params_->commands_comp[i];
+        } else {
+          const scalar_t yaw_error = wrap_to_pi(desired_heading_ - current_heading);
+          command = rl_params_->heading_hold_stiffness * yaw_error + rl_params_->commands_comp[i];
+        }
+      } else {
+        command = user_yaw_rate + rl_params_->commands_comp[i];
+      }
     } else if (rl_params_->commands_name[i] == "base_height") {
       command = rl_params_->commands_gain[i] * _data->rc_data->pose_position[point::Z] +
                 rl_params_->commands_comp[i];

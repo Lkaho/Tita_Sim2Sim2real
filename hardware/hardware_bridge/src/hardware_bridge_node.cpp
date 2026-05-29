@@ -26,7 +26,7 @@ namespace tita_locomotion
 {
 namespace
 {
-constexpr double kWheelVelocityLimit = 20.0;
+constexpr double kWheelVelocityLimit = 50.0;
 constexpr double kWheelTorqueLimit = 20.0;
 constexpr double kWheelTorqueSlewRate = 120.0;  // Nm/s
 constexpr double kFallbackControlDt = 0.002;    // 500 Hz ros2_control loop

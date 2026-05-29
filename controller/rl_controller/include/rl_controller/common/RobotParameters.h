@@ -59,11 +59,20 @@ struct RLParameters
 {
   std::string policy_path;
   std::string output_name;          // output of the policy name
-  std::string policy_type{"np3o"};  // ppo or np3o
+  std::string policy_type{"np3o"};  // ppo, np3o, or dreamwaq
   bool use_velocity_estimator{false};
   std::string estimator_policy_path;
   std::string estimator_output_name{"estimated_velocity"};
   int estimator_history_len{3};
+  std::string dreamwaq_encoder_policy_path;
+  std::string dreamwaq_encoder_output_name{"encoder_feature"};
+  std::string dreamwaq_vel_mu_policy_path;
+  std::string dreamwaq_vel_mu_output_name{"estimated_velocity"};
+  std::string dreamwaq_latent_mu_policy_path;
+  std::string dreamwaq_latent_mu_output_name{"latent_mean"};
+  int dreamwaq_encoder_feature_dim{64};
+  int dreamwaq_velocity_dim{3};
+  int dreamwaq_latent_dim{16};
   int num_obs;
   int num_actions;
   int history_len{1};
@@ -77,16 +86,17 @@ struct RLParameters
   std::vector<scalar_t> min_commands{-1.0, -1.0, -1.0};
   std::vector<scalar_t> commands_comp{0.0, 0.0, 0.0};
   std::vector<scalar_t> commands_gain{1.0, 1.0, 1.0};
-  std::string base_lin_vel_xy_sim_topic{""};
-  int base_lin_vel_xy_sim_rate_hz{0};
-  std::string base_lin_vel_xy_hw_topic{""};
-  int base_lin_vel_xy_hw_rate_hz{0};
+  bool heading_hold_enabled{true};
+  scalar_t heading_hold_stiffness{0.5};
+  scalar_t heading_hold_yaw_input_threshold{1.0e-3};
+  bool csv_logging_enabled{true};
   scalar_t episode_length{0};  // 0 means no limit, units: seconds
 
   scalar_t time_interval{0.02};
   // "P" means all joints use position control,
   // "P_V" mean wheel use velocity control, other use position control
   std::string control_type{"P"};
+  std::string wheel_torque_mode{"legacy"};  // legacy or velocity_ff
   std::vector<scalar_t> default_joint_angles;
   std::vector<scalar_t> joint_kp;
   std::vector<scalar_t> joint_kd;

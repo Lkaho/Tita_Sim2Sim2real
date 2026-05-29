@@ -428,6 +428,30 @@ void RlController::update_control_parameters()
       policy_name + ".estimator_output_name", rl_params.estimator_output_name);
     get_node()->get_parameter<int>(
       policy_name + ".estimator_history_len", rl_params.estimator_history_len);
+    get_node()->get_parameter<std::string>(
+      policy_name + ".dreamwaq_encoder_policy_path", rl_params.dreamwaq_encoder_policy_path);
+    rl_params.dreamwaq_encoder_policy_path =
+      resolve_policy_path(rl_params.dreamwaq_encoder_policy_path);
+    get_node()->get_parameter<std::string>(
+      policy_name + ".dreamwaq_encoder_output_name", rl_params.dreamwaq_encoder_output_name);
+    get_node()->get_parameter<std::string>(
+      policy_name + ".dreamwaq_vel_mu_policy_path", rl_params.dreamwaq_vel_mu_policy_path);
+    rl_params.dreamwaq_vel_mu_policy_path =
+      resolve_policy_path(rl_params.dreamwaq_vel_mu_policy_path);
+    get_node()->get_parameter<std::string>(
+      policy_name + ".dreamwaq_vel_mu_output_name", rl_params.dreamwaq_vel_mu_output_name);
+    get_node()->get_parameter<std::string>(
+      policy_name + ".dreamwaq_latent_mu_policy_path", rl_params.dreamwaq_latent_mu_policy_path);
+    rl_params.dreamwaq_latent_mu_policy_path =
+      resolve_policy_path(rl_params.dreamwaq_latent_mu_policy_path);
+    get_node()->get_parameter<std::string>(
+      policy_name + ".dreamwaq_latent_mu_output_name", rl_params.dreamwaq_latent_mu_output_name);
+    get_node()->get_parameter<int>(
+      policy_name + ".dreamwaq_encoder_feature_dim", rl_params.dreamwaq_encoder_feature_dim);
+    get_node()->get_parameter<int>(
+      policy_name + ".dreamwaq_velocity_dim", rl_params.dreamwaq_velocity_dim);
+    get_node()->get_parameter<int>(
+      policy_name + ".dreamwaq_latent_dim", rl_params.dreamwaq_latent_dim);
     // env
     get_node()->get_parameter<int>(policy_name + ".num_obs", rl_params.num_obs);
     get_node()->get_parameter<int>(policy_name + ".num_actions", rl_params.num_actions);
@@ -446,17 +470,20 @@ void RlController::update_control_parameters()
       policy_name + ".min_commands", rl_params.min_commands);
     get_node()->get_parameter<std::vector<scalar_t>>(
       policy_name + ".commands_comp", rl_params.commands_comp);
-    get_node()->get_parameter<std::string>(
-      policy_name + ".base_lin_vel_xy.sim_topic", rl_params.base_lin_vel_xy_sim_topic);
-    get_node()->get_parameter<int>(
-      policy_name + ".base_lin_vel_xy.sim_rate_hz", rl_params.base_lin_vel_xy_sim_rate_hz);
-    get_node()->get_parameter<std::string>(
-      policy_name + ".base_lin_vel_xy.hw_topic", rl_params.base_lin_vel_xy_hw_topic);
-    get_node()->get_parameter<int>(
-      policy_name + ".base_lin_vel_xy.hw_rate_hz", rl_params.base_lin_vel_xy_hw_rate_hz);
+    get_node()->get_parameter<bool>(
+      policy_name + ".heading_hold_enabled", rl_params.heading_hold_enabled);
+    get_node()->get_parameter<scalar_t>(
+      policy_name + ".heading_hold_stiffness", rl_params.heading_hold_stiffness);
+    get_node()->get_parameter<scalar_t>(
+      policy_name + ".heading_hold_yaw_input_threshold",
+      rl_params.heading_hold_yaw_input_threshold);
+    get_node()->get_parameter<bool>(
+      policy_name + ".csv_logging_enabled", rl_params.csv_logging_enabled);
     get_node()->get_parameter<scalar_t>(policy_name + ".episode_length", rl_params.episode_length);
     // control
     get_node()->get_parameter<scalar_t>(policy_name + ".time_interval", rl_params.time_interval);
+    get_node()->get_parameter<std::string>(
+      policy_name + ".wheel_torque_mode", rl_params.wheel_torque_mode);
     get_node()->get_parameter<std::vector<scalar_t>>(
       policy_name + ".default_joint_angles", rl_params.default_joint_angles);
     get_node()->get_parameter<std::vector<scalar_t>>(policy_name + ".joint_kp", rl_params.joint_kp);

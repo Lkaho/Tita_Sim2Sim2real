@@ -22,11 +22,9 @@
 #include <thread>
 
 #include "FSMState.h"
-#include "geometry_msgs/msg/vector3.hpp"
 #include "rclcpp/rclcpp.hpp"
 #include "rl_controller/common/timeMarker.h"
 #include "rl_controller/inferrer/inferrer_base.hpp"
-#include "std_msgs/msg/float64.hpp"
 
 struct Observations
 {
@@ -104,10 +102,6 @@ protected:
   bool requires_base_lin_vel_xy() const;
   size_t actor_history_input_dim() const;
   size_t estimator_history_input_dim() const;
-  void setup_base_lin_vel_subscription();
-  void sim_base_lin_vel_cb(const geometry_msgs::msg::Vector3::SharedPtr msg);
-  void hw_base_lin_vel_cb(const std_msgs::msg::Float64::SharedPtr msg);
-  bool should_accept_base_lin_vel_sample(double now_sec, double & last_time_sec, int rate_hz);
   void open_strict_start_log();
   void close_strict_start_log();
   void log_strict_policy_output(
@@ -191,18 +185,10 @@ protected:
   bool stop_update_ = false;
   bool thread_first_ = true;
   bool has_base_lin_vel_xy_observation_ = false;
-  bool use_sim_base_lin_vel_source_ = false;
-  std::mutex base_lin_vel_mutex_;
   std::mutex action_mutex_;
   std::mutex strict_log_mutex_;
   std::mutex hardware_log_mutex_;
-  Vec3<tensor_element_t> latest_base_lin_vel_world_ = Vec3<tensor_element_t>::Zero();
-  Vec3<tensor_element_t> latest_base_lin_vel_body_ = Vec3<tensor_element_t>::Zero();
   Vec3<tensor_element_t> estimated_base_lin_vel_body_ = Vec3<tensor_element_t>::Zero();
-  double last_base_lin_vel_sim_update_time_ = -1.0;
-  double last_base_lin_vel_hw_update_time_ = -1.0;
-  rclcpp::Subscription<geometry_msgs::msg::Vector3>::SharedPtr base_lin_vel_sim_subscription_;
-  rclcpp::Subscription<std_msgs::msg::Float64>::SharedPtr base_lin_vel_hw_subscription_;
 
 private:
   int iter_ = 0;
@@ -211,11 +197,13 @@ private:
   double last_obs_debug_time_ = 0.0;
   std::ofstream strict_start_log_;
   std::string strict_start_log_path_;
+  std::string log_run_id_;
   size_t strict_policy_step_ = 0;
   std::ofstream hardware_frame_log_;
   std::string hardware_frame_log_path_;
   size_t hardware_frame_step_ = 0;
-  static constexpr size_t kStrictPolicyLogLimit = 200;
+  bool heading_hold_initialized_ = false;
+  scalar_t desired_heading_ = 0.0;
 };
 
 #endif  // RL_CONTROLLER__FSM__FSMSTATE_RL_H_

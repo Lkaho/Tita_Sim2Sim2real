@@ -77,7 +77,7 @@
 
       rl_flat:
         # policy_path: config/tita/flat.onnx
-        policy_path: config/tita/policy_flat.onnx
+        policy_path: config/tita/policy_noBaseVel.onnx
         output_name: "actions"
         # output_name: "78"
         policy_type: "ppo"
@@ -87,34 +87,23 @@
         num_actions: 8
         history_len: 10
         observations_history_mode: "term"  #term or frame
-        # observations_name: ["ang_vel", "gravity", "commands", "dof_pos_nwp", "dof_vel", "last_actions"]
-        # For a policy trained with base_lin_vel_xy, switch to a matching 33-dim model and use:
-        # observations_name: ["ang_vel", "gravity", "commands", "dof_pos_nwp", "dof_vel", "last_actions", "base_lin_vel_xy"]
         observations_name: ["ang_vel", "gravity", "commands", "dof_pos_nwp", "dof_vel", "last_actions"]
-        # observations_dims: [3, 3, 3, 6, 8, 8, 2]
         observations_dims: [3, 3, 3, 6, 8, 8]
         commands_name: ["lin_vel_x", "lin_vel_y", "ang_vel_z"]
         commands_scale: [2.0, 2.0, 0.25] # lin_vel_scale, lin_vel_scale, ang_vel_scale
         max_commands: [1.0, 0.0, 1.0]
         min_commands: [-1.0, -0.0, -1.0]
         commands_comp: [0.0, 0.0, 0.0] # direct add offset to command
-        # base_lin_vel_xy source:
-        # sim: subscribe geometry_msgs/Vector3 from /tita/tita_webots/gps/speed_vector,
-        #      then rotate world-frame velocity into body frame with IMU quaternion.
-        # hw:  subscribe std_msgs/Float64 body-frame x velocity; y velocity is treated as zero.
-        # Rate is the accepted sample rate used by the controller-side callback throttle.
-        base_lin_vel_xy:
-          sim_topic: "/tita/gps/speed_vector"
-          sim_rate_hz: 100
-          hw_topic: "/tita4253234/robot_vel"
-          hw_rate_hz: 100
+        # Match Isaac Lab play.py keyboard behavior: hold current heading when no yaw key is pressed.
+        heading_hold_enabled: true
+        heading_hold_stiffness: 0.5
+        heading_hold_yaw_input_threshold: 0.001
         # control parameters
         time_interval: 0.02 # match Isaac Lab policy step: sim.dt(0.005) * decimation(4)
+        wheel_torque_mode: "velocity_ff"
         default_joint_angles: [0.0, 0.8, -1.5, 0.0, 0.0, 0.8, -1.5, 0.0]
-        # joint_kp: [40.0, 40.0, 40.0, 12.0, 40.0, 40.0, 40.0, 12.0]
         joint_kp: [40.0, 40.0, 40.0, 12.0, 40.0, 40.0, 40.0, 12.0]
-        joint_kd: [1.0, 1.0, 1.0, 0.6, 1.0, 1.0, 1.0, 0.6]
-        # joint_kd: [1.0, 1.0, 1.0, 0.8, 1.0, 1.0, 1.0, 0.8]
+        joint_kd: [1.0, 1.0, 1.0, 0.5, 1.0, 1.0, 1.0, 0.5]
         action_scales: [ 0.25, 0.5, 0.5, 0.5, 0.25, 0.5, 0.5, 0.5 ]
 
         lin_vel_scale: 2.0

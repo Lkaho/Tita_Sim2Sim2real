@@ -18,16 +18,26 @@
 
   <worldbody>
     <light pos="0 0 1.5" dir="0 0 -1" directional="true"/>
-    <geom name="floor" size="0 0 0.05" type="plane" material="groundplane"/>
+    <geom name="floor" size="0 0 0.05" type="plane" material="groundplane" friction="1.0 0.005 0.0001" condim="3"/>
 
-    <geom pos="1.2 0 0.04" type="box"  size="0.1 2 0.04" quat="1.0 0 0 0"/>
-    <geom pos="1.6 0 0.04" type="box"  size="0.1 2 0.04" quat="1.0 0 0 0"/>
+    <geom name="up_stair_01" pos="1.250 0 0.040" type="box" size="0.250 0.635 0.040" rgba="0.55 0.52 0.46 1" friction="1.0 0.005 0.0001" condim="3"/>
+    <geom name="up_stair_02" pos="1.750 0 0.080" type="box" size="0.250 0.635 0.080" rgba="0.55 0.52 0.46 1" friction="1.0 0.005 0.0001" condim="3"/>
+    <geom name="up_stair_03" pos="2.250 0 0.120" type="box" size="0.250 0.635 0.120" rgba="0.55 0.52 0.46 1" friction="1.0 0.005 0.0001" condim="3"/>
+    <geom name="up_stair_04" pos="2.750 0 0.160" type="box" size="0.250 0.635 0.160" rgba="0.55 0.52 0.46 1" friction="1.0 0.005 0.0001" condim="3"/>
+    <geom name="up_stair_05" pos="3.250 0 0.200" type="box" size="0.250 0.635 0.200" rgba="0.55 0.52 0.46 1" friction="1.0 0.005 0.0001" condim="3"/>
+    <geom name="up_stair_06" pos="3.750 0 0.240" type="box" size="0.250 0.635 0.240" rgba="0.55 0.52 0.46 1" friction="1.0 0.005 0.0001" condim="3"/>
+    <geom name="up_stair_07" pos="4.250 0 0.280" type="box" size="0.250 0.635 0.280" rgba="0.55 0.52 0.46 1" friction="1.0 0.005 0.0001" condim="3"/>
+    <geom name="up_stair_08" pos="4.750 0 0.320" type="box" size="0.250 0.635 0.320" rgba="0.55 0.52 0.46 1" friction="1.0 0.005 0.0001" condim="3"/>
 
-    <geom pos="2.3 0 0.02" type="box"  size="0.2 2 0.15" quat="1.0 0 0 0"/>
-    <geom pos="2.6 0 0.02" type="box"  size="0.22 2 0.3" quat="1.0 0 0 0"/>
-    <geom pos="2.8 0 0.02" type="box"  size="0.23 2 0.45" quat="1.0 0 0 0"/>
-    <geom pos="3 0 0.02" type="box"  size="0.24 2 0.6" quat="1.0 0 0 0"/>
-    <geom pos="3.2 0 0.02" type="box"  size="0.25 2 0.75" quat="1.0 0 0 0"/>
-    <geom pos="3.4 0 0.02" type="box"  size="0.26 2 0.9" quat="1.0 0 0 0"/>
+    <geom name="stair_landing" pos="6.250 0 0.320" type="box" size="1.250 0.635 0.320" rgba="0.50 0.50 0.48 1" friction="1.0 0.005 0.0001" condim="3"/>
+
+    <geom name="down_stair_01" pos="7.750 0 0.320" type="box" size="0.250 0.635 0.320" rgba="0.55 0.52 0.46 1" friction="1.0 0.005 0.0001" condim="3"/>
+    <geom name="down_stair_02" pos="8.250 0 0.280" type="box" size="0.250 0.635 0.280" rgba="0.55 0.52 0.46 1" friction="1.0 0.005 0.0001" condim="3"/>
+    <geom name="down_stair_03" pos="8.750 0 0.240" type="box" size="0.250 0.635 0.240" rgba="0.55 0.52 0.46 1" friction="1.0 0.005 0.0001" condim="3"/>
+    <geom name="down_stair_04" pos="9.250 0 0.200" type="box" size="0.250 0.635 0.200" rgba="0.55 0.52 0.46 1" friction="1.0 0.005 0.0001" condim="3"/>
+    <geom name="down_stair_05" pos="9.750 0 0.160" type="box" size="0.250 0.635 0.160" rgba="0.55 0.52 0.46 1" friction="1.0 0.005 0.0001" condim="3"/>
+    <geom name="down_stair_06" pos="10.250 0 0.120" type="box" size="0.250 0.635 0.120" rgba="0.55 0.52 0.46 1" friction="1.0 0.005 0.0001" condim="3"/>
+    <geom name="down_stair_07" pos="10.750 0 0.080" type="box" size="0.250 0.635 0.080" rgba="0.55 0.52 0.46 1" friction="1.0 0.005 0.0001" condim="3"/>
+    <geom name="down_stair_08" pos="11.250 0 0.040" type="box" size="0.250 0.635 0.040" rgba="0.55 0.52 0.46 1" friction="1.0 0.005 0.0001" condim="3"/>
   </worldbody>
 </mujoco>

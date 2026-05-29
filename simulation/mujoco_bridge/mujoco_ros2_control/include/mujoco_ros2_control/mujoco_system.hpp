@@ -77,6 +77,9 @@ public:
     bool is_velocity_control_enabled{false};
     bool is_effort_control_enabled{false};
     bool is_pid_enabled{false};
+    bool is_wheel{false};
+    bool has_last_applied_effort{false};
+    double last_applied_effort{0.0};
     joint_limits::JointLimits joint_limits;
     bool is_mimic{false};
     int mimicked_joint_index;
@@ -127,6 +130,7 @@ private:
   std::vector<JointState> joint_states_;
   std::vector<FTSensorData> ft_sensor_data_;
   std::vector<IMUSensorData> imu_sensor_data_;
+  size_t leg_dof_{4};
 
   mjModel *mj_model_;
   mjData *mj_data_;

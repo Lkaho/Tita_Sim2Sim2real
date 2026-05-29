@@ -30,6 +30,7 @@ set(FSM_FILES
   src/fsm/FSMState_RL.cpp
   # src/fsm/FSMState_RL_Hopturn.cpp
   src/fsm/FSMState_RLPPO.cpp
+  src/fsm/FSMState_RLDreamWaQ.cpp
 
 )
 

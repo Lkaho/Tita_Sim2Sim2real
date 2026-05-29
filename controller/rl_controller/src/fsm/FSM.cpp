@@ -19,6 +19,7 @@
 #include <iostream>
 
 #include "rl_controller/fsm/FSMState_RLPPO.h"
+#include "rl_controller/fsm/FSMState_RLDreamWaQ.h"
 
 FSM::FSM(std::shared_ptr<ControlFSMData> data) : _data(data)
 {
@@ -42,6 +43,13 @@ FSM::FSM(std::shared_ptr<ControlFSMData> data) : _data(data)
     FSMState * rl_fsm;
     if (_data->params->rl_params[i].policy_type == "ppo") {
       rl_fsm = new FSMState_RLPPO(_data, &_data->params->rl_params[i], policy_name);
+    } else if (_data->params->rl_params[i].policy_type == "dreamwaq") {
+#ifdef USE_ENGINE
+      throw std::runtime_error(
+        "DreamWaQ/CENet split deployment supports ONNX runtime only; rebuild with USE_ENGINE=OFF");
+#else
+      rl_fsm = new FSMState_RLDreamWaQ(_data, &_data->params->rl_params[i], policy_name);
+#endif
     } else if (_data->params->rl_params[i].policy_type == "np3o") {
       rl_fsm = new FSMState_RL(_data, &_data->params->rl_params[i], policy_name);
     } else {

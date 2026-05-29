@@ -22,9 +22,9 @@
 
 namespace
 {
-constexpr double kWheelVelocityLimit = 20.0;
+constexpr double kWheelVelocityLimit = 50.0;
 constexpr std::array<double, 8> kDefaultJointAngles = {0.0, 0.8, -1.5, 0.0, 0.0, 0.8, -1.5, 0.0};
-constexpr std::array<double, 8> kJointKp = {40.0, 40.0, 40.0, 11.5, 40.0, 40.0, 40.0, 11.5};
+constexpr std::array<double, 8> kJointKp = {40.0, 40.0, 40.0, 12.0, 40.0, 40.0, 40.0, 12.0};
 constexpr std::array<double, 8> kJointKd = {1.0, 1.0, 1.0, 0.5, 1.0, 1.0, 1.0, 0.5};
 constexpr std::array<double, 8> kActionScales = {0.25, 0.5, 0.5, 0.5, 0.25, 0.5, 0.5, 0.5};
 constexpr std::array<double, 8> kTorqueLimit = {60.0, 60.0, 60.0, 20.0, 60.0, 60.0, 60.0, 20.0};
@@ -56,13 +56,15 @@ JointCommand command_from_action(double action, size_t index, double measured_ve
 
   JointCommand joint_command;
   if (is_wheel(index)) {
-    // Mirrors FSMState_RL::run() for wheel joints in control_type "P".
+    // Mirrors FSMState_RL::run() for wheel joints in velocity feedforward mode.
     joint_command.kp = 0.0;
     joint_command.kd = 0.0;
     joint_command.position = 0.0;
-    joint_command.velocity = 0.0;
+    joint_command.velocity = action_scaled;
     joint_command.effort =
-      clamp_torque_command(kJointKp[index] * command - kJointKd[index] * measured_velocity, index);
+      clamp_torque_command(
+        kJointKd[index] * (action_scaled - measured_velocity) + kJointKp[index] * action_scaled,
+        index);
     return joint_command;
   }
 
@@ -122,12 +124,34 @@ TEST(BridgeTorqueEquivalence, SameActionMatchesWhenWebotsVelocityLimitIsInactive
   }
 }
 
+TEST(BridgeTorqueEquivalence, WheelActionProducesVelocityFeedforwardTorqueCommand)
+{
+  const size_t wheel_index = 3;
+  const double action = 1.0;
+  const double measured_velocity = 2.0;
+  const JointCommand command = command_from_action(action, wheel_index, measured_velocity);
+
+  EXPECT_DOUBLE_EQ(command.velocity, 0.5);
+  EXPECT_DOUBLE_EQ(command.effort, 5.25);
+  EXPECT_DOUBLE_EQ(command.kp, 0.0);
+  EXPECT_DOUBLE_EQ(command.kd, 0.0);
+  EXPECT_DOUBLE_EQ(hardware_bridge_torque(command, 0.0, measured_velocity), 5.25);
+}
+
+TEST(BridgeTorqueEquivalence, WheelTorqueSaturatesAtLimit)
+{
+  const size_t wheel_index = 3;
+
+  EXPECT_DOUBLE_EQ(command_from_action(20.0, wheel_index, 0.0).effort, 20.0);
+  EXPECT_DOUBLE_EQ(command_from_action(-20.0, wheel_index, 0.0).effort, -20.0);
+}
+
 TEST(BridgeTorqueEquivalence, WebotsWheelVelocityLimitCanMakeTorqueDifferent)
 {
   const size_t wheel_index = 3;
-  const double action = 5.0;
+  const double action = 10.0;
   const double position = 0.0;
-  const double velocity_over_limit = 25.0;
+  const double velocity_over_limit = 55.0;
   const JointCommand command = command_from_action(action, wheel_index, velocity_over_limit);
 
   const double hardware_torque =
